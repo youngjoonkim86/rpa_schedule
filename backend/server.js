@@ -18,7 +18,6 @@ const syncRouter = require('./routes/sync');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const HOST = process.env.HOST || '0.0.0.0'; // Railway 등 클라우드 환경 지원
 const HOST = process.env.HOST || '0.0.0.0';
 
 // 미들웨어

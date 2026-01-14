@@ -58,6 +58,7 @@ function App() {
 
   const handleSync = async () => {
     setSyncLoading(true);
+    const startedAtMs = Date.now();
     try {
       const now = dayjs();
       // 당월 기준 -7일: 현재 월의 첫날에서 7일 전
@@ -83,14 +84,63 @@ function App() {
         5 // 5초간 표시
       );
       
-      // 캘린더 새로고침
-      window.location.reload();
+      // 캘린더/봇 목록 새로고침 (페이지 리로드 대신)
+      setCalendarRefresh(prev => prev + 1);
+      loadBots();
     } catch (error: any) {
       console.error('Failed to sync:', error);
       
       let errorMessage = '동기화에 실패했습니다.';
+      // 프론트 요청 타임아웃이어도 서버는 계속 동기화 중일 수 있으므로
+      // /sync/status 를 폴링해서 "서버 완료" 시점까지 로딩을 유지한다.
       if (error.code === 'ECONNABORTED') {
-        errorMessage = '동기화 시간이 초과되었습니다. 서버 로그를 확인하거나 나중에 다시 시도해주세요.';
+        message.warning('동기화 요청이 타임아웃되었습니다. 서버에서 계속 진행 중인지 상태를 확인합니다...', 5);
+
+        const maxWaitMs = 30 * 60 * 1000; // 30분
+        const pollIntervalMs = 5000; // 5초
+        const deadline = Date.now() + maxWaitMs;
+
+        // 완료될 때까지 상태 폴링
+        // (sync_logs는 완료 시점에 기록되므로, startedAt 이후의 로그가 보이면 완료로 간주)
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          if (Date.now() > deadline) {
+            message.error('동기화 상태 확인 시간이 초과되었습니다. 잠시 후 다시 확인해주세요.', 10);
+            break;
+          }
+
+          try {
+            const statusRes = await syncApi.getSyncStatus();
+            const latest: any = statusRes.data?.data;
+            if (latest) {
+              const tsRaw = latest.sync_datetime || latest.syncDatetime || latest.syncDatetimeUtc;
+              const latestMs = tsRaw ? new Date(tsRaw).getTime() : 0;
+              if (latestMs && latestMs >= startedAtMs) {
+                const syncStatus = latest.sync_status || latest.syncStatus;
+                const synced = latest.records_synced ?? latest.recordsSynced ?? 0;
+
+                if (syncStatus === 'SUCCESS' || syncStatus === 'PARTIAL') {
+                  message.success(`동기화 완료! (DB 저장/업데이트: ${synced}개)`, 6);
+                  setCalendarRefresh(prev => prev + 1);
+                  loadBots();
+                } else if (syncStatus === 'FAILED') {
+                  message.error(`동기화 실패: ${latest.error_message || latest.errorMessage || ''}`, 10);
+                } else {
+                  message.info('동기화가 완료되었습니다. 캘린더를 새로고침합니다.', 5);
+                  setCalendarRefresh(prev => prev + 1);
+                  loadBots();
+                }
+                break;
+              }
+            }
+          } catch (statusErr) {
+            // 상태 조회가 실패해도 잠시 후 재시도
+          }
+
+          await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+        }
+
+        return;
       } else if (error.response?.data?.error) {
         errorMessage = error.response.data.error;
       }
