@@ -27,11 +27,13 @@ choco install ngrok -y
 ## ngrok 인증 설정
 
 1. https://ngrok.com 에서 무료 계정 생성
-2. 대시보드에서 인증 토큰 복사
-3. 토큰 설정:
+2. https://dashboard.ngrok.com/get-started/your-authtoken 접속
+3. 대시보드에서 **올바른 인증 토큰** 복사 (전체 토큰을 정확히 복사)
+4. 토큰 설정:
    ```powershell
    ngrok config add-authtoken YOUR_AUTH_TOKEN
    ```
+   ⚠️ **주의**: `YOUR_AUTH_TOKEN`을 대시보드에서 복사한 실제 토큰으로 변경하세요!
 
 ## 확인
 
