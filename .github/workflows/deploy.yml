@@ -1,0 +1,11 @@
+name: Deploy
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  # 프론트엔드는 Vercel에서 자동 배포되므로 여기서는 백엔드만 처리
+  # Railway는 GitHub 연동으로 자동 배포되므로 이 워크플로우는 선택사항
+

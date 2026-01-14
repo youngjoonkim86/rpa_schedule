@@ -1,0 +1,28 @@
+.App {
+  text-align: center;
+}
+
+/* FullCalendar 커스터마이징 */
+.fc {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
+.fc-toolbar-title {
+  font-size: 1.5rem;
+  font-weight: 600;
+}
+
+.fc-button {
+  border-radius: 4px;
+}
+
+.fc-event {
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.fc-event:hover {
+  opacity: 0.8;
+}
+
+
