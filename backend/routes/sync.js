@@ -111,6 +111,22 @@ router.post('/rpa-schedules', async (req, res) => {
     // 2단계: 각 스케줄에 대해 BOT 일정 조회 및 등록
     for (const schedule of schedules) {
       try {
+        // 0단계(중요): DB에 이미 있는 스케줄이면 Power Automate 등록까지 포함해서 건너뜀
+        // - JS Date 파싱/타임존 이슈로 중복 판정이 흔들리지 않도록 "정확 일치"를 DB에서 확인
+        const botIdForDb = schedule.botId || schedule.botName;
+        const existsInDb = await Schedule.existsExactActive({
+          botId: botIdForDb,
+          subject: schedule.subject,
+          startIso: schedule.start,
+          endIso: schedule.end
+        });
+
+        if (existsInDb) {
+          skippedCount++;
+          console.log(`⏭️ DB 중복 일정 건너뜀(=PA 등록도 생략): ${schedule.botName} - ${schedule.subject} (${schedule.start})`);
+          continue;
+        }
+
         // 2-1: Power Automate에서 BOT 일정 조회
         const startDateTime = new Date(schedule.start).toISOString();
         const endDateTime = new Date(schedule.end).toISOString();
@@ -153,7 +169,9 @@ router.post('/rpa-schedules', async (req, res) => {
           }
         } catch (queryError) {
           console.warn(`⚠️ Power Automate 일정 조회 실패 (${schedule.botName}):`, queryError.message);
-          // 조회 실패해도 계속 진행
+          // 조회 실패 시 "없다"로 간주하고 등록하면, 동기화마다 중복 등록되는 문제가 생길 수 있음.
+          // 따라서 조회 실패 시에는 안전하게 "등록 생략" 처리한다.
+          existsInPowerAutomate = true;
         }
         
         // 2-2: Power Automate에 일정이 없으면 등록
@@ -187,40 +205,7 @@ router.post('/rpa-schedules', async (req, res) => {
           console.log(`⏭️ 일정 건너뜀 (이미 존재): ${schedule.botName} - ${schedule.subject}`);
         }
         
-        // 3단계: DB에 저장 또는 업데이트 (중복 체크 포함)
-        // 먼저 DB에서 중복 확인 (더 엄격한 체크)
-        const startDateStr = schedule.start.split('T')[0];
-        const endDateStr = schedule.end.split('T')[0];
-        const existingSchedules = await Schedule.findByDateRange(
-          startDateStr,
-          endDateStr,
-          schedule.botId || schedule.botName
-        );
-        
-        // 동일한 시간대에 동일한 작업이 있는지 확인
-        const isDuplicate = existingSchedules.some(existing => {
-          const existingStart = new Date(existing.start);
-          const existingEnd = new Date(existing.end);
-          const newStart = new Date(schedule.start);
-          const newEnd = new Date(schedule.end);
-          
-          // 시간이 겹치거나 5분 이내 차이이고, 제목이 동일한 경우 중복으로 간주
-          const timeOverlap = (existingStart <= newEnd && existingEnd >= newStart) ||
-                             (Math.abs(existingStart.getTime() - newStart.getTime()) < 5 * 60 * 1000);
-          const subjectMatch = existing.subject === schedule.subject;
-          const botMatch = (existing.botId === schedule.botId || existing.botId === schedule.botName) ||
-                          (existing.botName === schedule.botName || existing.botName === schedule.botId);
-          
-          return timeOverlap && subjectMatch && botMatch;
-        });
-        
-        if (isDuplicate) {
-          skippedCount++;
-          console.log(`⏭️ DB 중복 일정 건너뜀: ${schedule.botName} - ${schedule.subject} (${schedule.start})`);
-          continue; // 다음 스케줄로
-        }
-        
-        // upsert 메서드가 자동으로 중복을 체크하고 업데이트하거나 생성함
+        // 3단계: DB에 저장 또는 업데이트 (upsert가 중복을 체크/업데이트)
         // botId가 비어있으면 botName을 사용
         const scheduleId = await Schedule.upsert({
           bot_id: schedule.botId || schedule.botName, // botId가 없으면 botName 사용
