@@ -138,13 +138,18 @@ class BrityRpaService {
       if (!apiUrl.includes('/scheduler/api/v1')) {
         apiUrl = apiUrl.replace(/\/$/, '') + '/scheduler/api/v1';
       }
-      const endpoint = `${apiUrl}/schedulings/list`;
+      // ✅ 운영 환경에 따라 미래 일정(캘린더 표시용)은 /schedulings/calendar/list 가 필요한 경우가 있음
+      // default: /schedulings/calendar/list
+      // override: BRITY_SCHEDULINGS_PATH=/schedulings/list
+      const schedulingsPath = process.env.BRITY_SCHEDULINGS_PATH || '/schedulings/calendar/list';
+      const normalizedPath = schedulingsPath.startsWith('/') ? schedulingsPath : `/${schedulingsPath}`;
+      const endpoint = `${apiUrl}${normalizedPath}`;
       
       if (!process.env.BRITY_RPA_TOKEN) {
         throw new Error('BRITY_RPA_TOKEN이 설정되어 있지 않습니다. backend/.env에 BRITY_RPA_TOKEN을 설정해주세요.');
       }
 
-      console.log(`📡 Brity RPA 등록 스케줄 API 호출: ${endpoint}`);
+      console.log(`📡 Brity RPA 등록/캘린더 스케줄 API 호출: ${endpoint}`);
       console.log(`📅 기간: ${startDate} ~ ${endDate}`);
       
       // schedulings/list 는 보통 "YYYY-MM-DD HH:mm" 형태를 기대 (명세/샘플 기준)

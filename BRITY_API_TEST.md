@@ -2,9 +2,9 @@
 
 ## 수정 사항
 
-1. **API 엔드포인트 수정**
-   - `/schedulings/calendar/list` → `/schedulings/list`로 변경
-   - 실제 API 명세에 맞게 수정
+1. **API 엔드포인트**
+   - 기본: `/schedulings/calendar/list` (미래 일정/캘린더 표시용으로 더 적합한 경우가 많음)
+   - 필요 시 환경변수로 변경: `BRITY_SCHEDULINGS_PATH=/schedulings/list`
 
 2. **데이터 매핑 개선**
    - `nextJobTime` 우선 사용 (다음 실행 시간)
