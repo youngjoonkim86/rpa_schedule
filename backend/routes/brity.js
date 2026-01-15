@@ -24,8 +24,16 @@ router.get('/failures', async (req, res) => {
     // Brity 실행 결과 조회 (/jobs/list)
     const jobs = await BrityRpaService.getJobResults(startIso, endIso);
 
+    // ✅ "지정된 일자"만 보이도록 한번 더 필터링
+    // - Brity가 범위 밖 데이터도 섞어 내려주는 환경이 있어 안전장치 추가
+    const jobsForDate = jobs.filter(j => {
+      const t = moment.tz(j.start || j.scheduledTime, tz);
+      if (!t.isValid()) return false;
+      return t.format('YYYY-MM-DD') === dateStr;
+    });
+
     // 실패만 필터링: detailCode === "1" 이 성공(기존 매핑 기준), 그 외는 실패로 간주
-    const failed = jobs.filter(j => {
+    const failed = jobsForDate.filter(j => {
       if (j.detailCode == null) return false;
       return String(j.detailCode) !== '1';
     });
