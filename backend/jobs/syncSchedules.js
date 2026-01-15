@@ -61,7 +61,9 @@ if (brityRpaService && Schedule && db) {
       const endIso = moment.tz(endDateStr, 'YYYY-MM-DD', tz).endOf('day').toISOString();
       schedules = await brityRpaService.getJobResults(startIso, endIso);
 
-      const mergeSchedulings = String(process.env.BRITY_SYNC_MERGE_SCHEDULINGS || 'false').toLowerCase() === 'true';
+      const mergeSchedulings =
+        String(process.env.BRITY_SYNC_MERGE_SCHEDULINGS || 'false').toLowerCase() === 'true' ||
+        endDateStr > todayStr;
       if (mergeSchedulings) {
         schedules = [...schedules, ...(await brityRpaService.getSchedules(startDateStr, endDateStr))];
       }

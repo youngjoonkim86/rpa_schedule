@@ -211,9 +211,12 @@ router.post('/rpa-schedules', async (req, res) => {
       // 필요 시(환경별) 등록 스케줄 API도 병합할 수 있게 옵션 제공
       // - default: false (jobs/list만 사용)
       // - enable: BRITY_SYNC_MERGE_SCHEDULINGS=true
-      const mergeSchedulings = String(process.env.BRITY_SYNC_MERGE_SCHEDULINGS || 'false').toLowerCase() === 'true';
+      // ✅ 미래 일정은 schedulings(등록 스케줄)에서 내려오는 케이스가 많아 자동 병합
+      const mergeSchedulings =
+        String(process.env.BRITY_SYNC_MERGE_SCHEDULINGS || 'false').toLowerCase() === 'true' ||
+        endDate > todayStr;
       if (mergeSchedulings) {
-        console.log('➕ 옵션: /schedulings/* 병합 활성화');
+        console.log('➕ /schedulings/* 병합(미래 일정 포함)');
         const schedRes = await brityRpaService.getSchedulesWithMeta(startDate, endDate);
         brityDebug.schedulings = schedRes.meta;
         schedules = [...schedules, ...schedRes.items];
