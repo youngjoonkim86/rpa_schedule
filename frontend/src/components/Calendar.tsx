@@ -281,6 +281,13 @@ const Calendar: React.FC<CalendarProps> = ({ selectedBots, refreshTrigger }) => 
         eventContent={(arg) => {
           const scheduleId = parseInt(String(arg.event.id), 10);
           const sourceSystem = (arg.event.extendedProps as any)?.sourceSystem as string | undefined;
+          const botId = (arg.event.extendedProps as any)?.botId as string | undefined;
+          const botName = (arg.event.extendedProps as any)?.botName as string | undefined;
+          const isManual =
+            sourceSystem === 'MANUAL' ||
+            botId === '일정등록' ||
+            botName === '일정등록';
+
           const disabled = deletingId === scheduleId;
 
           return (
@@ -298,18 +305,20 @@ const Calendar: React.FC<CalendarProps> = ({ selectedBots, refreshTrigger }) => 
                 {arg.timeText ? `${arg.timeText} ` : ''}
                 {arg.event.title}
               </div>
-              <Button
-                size="small"
-                danger
-                disabled={disabled || Number.isNaN(scheduleId)}
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  if (!Number.isNaN(scheduleId)) confirmDelete(scheduleId, sourceSystem);
-                }}
-              >
-                삭제
-              </Button>
+              {isManual && (
+                <Button
+                  size="small"
+                  danger
+                  disabled={disabled || Number.isNaN(scheduleId)}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (!Number.isNaN(scheduleId)) confirmDelete(scheduleId, sourceSystem);
+                  }}
+                >
+                  삭제
+                </Button>
+              )}
             </div>
           );
         }}
