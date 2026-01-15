@@ -9,6 +9,7 @@ import { message } from 'antd';
 import dayjs from 'dayjs';
 import 'dayjs/locale/ko';
 import koLocale from '@fullcalendar/core/locales/ko';
+import BrityFailuresPanel from './BrityFailuresPanel';
 
 dayjs.locale('ko');
 
@@ -179,6 +180,9 @@ const Calendar: React.FC<CalendarProps> = ({ selectedBots, refreshTrigger }) => 
         dayMaxEvents={3}
         moreLinkClick="popover"
       />
+
+      {/* 캘린더 하단: 금일 Brity 실패 내역(10분 단위) */}
+      <BrityFailuresPanel intervalMinutes={10} />
     </div>
   );
 };

@@ -154,3 +154,44 @@ export const syncApi = {
   },
 };
 
+export interface BrityFailureJobItem {
+  id: string;
+  jobId: string;
+  botId: string;
+  botName: string;
+  processId?: string;
+  processName?: string;
+  subject: string;
+  start: string;
+  end: string;
+  statusCode?: string;
+  statusName?: string;
+  detailCode?: string;
+  detailName?: string;
+  scheduledTime?: string;
+}
+
+export interface BrityFailureBucket {
+  key: string; // HH:mm
+  start: string; // ISO
+  end: string;   // ISO
+  count: number;
+  items: BrityFailureJobItem[];
+}
+
+export const brityApi = {
+  getFailures: (date?: string, intervalMinutes: number = 10) => {
+    return apiClient.get<{
+      success: boolean;
+      date: string;
+      timeZone: string;
+      intervalMinutes: number;
+      totalFailed: number;
+      buckets: BrityFailureBucket[];
+    }>('/brity/failures', {
+      params: { date, intervalMinutes },
+      timeout: 60000,
+    });
+  },
+};
+

@@ -3,8 +3,129 @@ require('dotenv').config();
 
 class BrityRpaService {
   /**
-   * Brity RPA API를 통해 Job 수행 결과 조회
+   * Brity RPA API를 통해 Job 수행 결과(이력) 조회
    * API: POST /scheduler/api/v1/jobs/list
+   *
+   * @param {string} startIso UTC ISO 8601 (예: 2026-01-15T00:00:00.000Z)
+   * @param {string} endIso   UTC ISO 8601
+   */
+  static async getJobResults(startIso, endIso, offset = 0, limit = 100) {
+    try {
+      let apiUrl = process.env.BRITY_RPA_URL;
+      if (!apiUrl) {
+        apiUrl = 'https://bwrpa.samsungsds.com:8777/scheduler/api/v1';
+      }
+      if (!apiUrl.includes('/scheduler/api/v1')) {
+        apiUrl = apiUrl.replace(/\/$/, '') + '/scheduler/api/v1';
+      }
+      const endpoint = `${apiUrl}/jobs/list`;
+
+      if (!process.env.BRITY_RPA_TOKEN) {
+        throw new Error('BRITY_RPA_TOKEN이 설정되어 있지 않습니다. backend/.env에 BRITY_RPA_TOKEN을 설정해주세요.');
+      }
+
+      const requestBody = {
+        offset,
+        limit,
+        orderBy: 'startTime desc',
+        parameter: {
+          startDatetime: startIso,
+          endDatetime: endIso
+        }
+      };
+
+      const response = await axios.post(endpoint, requestBody, {
+        headers: {
+          Authorization: process.env.BRITY_RPA_TOKEN,
+          'Content-Type': 'application/json'
+        },
+        timeout: 30000
+      });
+
+      const list = response.data.list || [];
+      const totalCount = response.data.totalCount || list.length || 0;
+      const listCount = response.data.listCount || list.length || 0;
+
+      let all = [...list];
+      let currentOffset = offset + listCount;
+
+      if (totalCount > all.length) {
+        const maxLimit = 100;
+        if (limit < maxLimit && totalCount > limit) {
+          return await this.getJobResults(startIso, endIso, 0, maxLimit);
+        }
+
+        while (all.length < totalCount) {
+          const nextBody = {
+            offset: currentOffset,
+            limit: maxLimit,
+            orderBy: 'startTime desc',
+            parameter: {
+              startDatetime: startIso,
+              endDatetime: endIso
+            }
+          };
+          const nextRes = await axios.post(endpoint, nextBody, {
+            headers: {
+              Authorization: process.env.BRITY_RPA_TOKEN,
+              'Content-Type': 'application/json'
+            },
+            timeout: 30000
+          });
+
+          const nextList = nextRes.data.list || [];
+          const nextListCount = nextRes.data.listCount || nextList.length;
+          if (nextList.length === 0) break;
+          all.push(...nextList);
+          currentOffset += nextListCount;
+        }
+      }
+
+      // 정규화
+      return all
+        .filter(j => j.startTime)
+        .map(j => {
+          const start = j.startTime;
+          const end = j.endTime || (() => {
+            const d = new Date(start);
+            d.setMinutes(d.getMinutes() + 1);
+            return d.toISOString();
+          })();
+
+          return {
+            id: j.jobId,
+            jobId: j.jobId,
+            botId: j.botId || '',
+            botName: j.botName || j.botId || '',
+            processId: j.processId,
+            processName: j.processName,
+            subject: j.processName || j.jobName || j.jobId || '제목 없음',
+            start,
+            end,
+            statusCode: j.statusCode,
+            statusName: j.statusName,
+            detailCode: j.detailCode,
+            detailName: j.detailName,
+            scheduledTime: j.scheduledTime,
+            sourceSystem: 'BRITY_RPA'
+          };
+        });
+    } catch (error) {
+      console.error('Brity RPA Job 결과 조회 실패:', error.message);
+      if (error.response && error.response.status === 401) {
+        throw new Error('Brity RPA 인증 토큰이 만료되었거나 유효하지 않습니다. 토큰을 갱신해주세요.');
+      }
+      throw new Error(`Brity RPA API 오류: ${error.message}`);
+    }
+  }
+
+  /**
+   * Brity RPA API를 통해 "등록된 스케줄" 조회 (미래 일정 포함)
+   * API: POST /scheduler/api/v1/schedulings/list
+   *
+   * ⚠️ 주의:
+   * - /jobs/list 는 "수행 결과(이력)" 위주라 미래(오늘 이후) 일정이 거의 나오지 않습니다.
+   * - 미래 1년치 스케줄을 동기화하려면 /schedulings/list 를 사용해야 합니다.
    */
   static async getSchedules(startDate, endDate, offset = 0, limit = 100) {
     try {
@@ -17,23 +138,28 @@ class BrityRpaService {
       if (!apiUrl.includes('/scheduler/api/v1')) {
         apiUrl = apiUrl.replace(/\/$/, '') + '/scheduler/api/v1';
       }
-      const endpoint = `${apiUrl}/jobs/list`;
+      const endpoint = `${apiUrl}/schedulings/list`;
       
-      console.log(`📡 Brity RPA Job 수행 결과 API 호출: ${endpoint}`);
+      if (!process.env.BRITY_RPA_TOKEN) {
+        throw new Error('BRITY_RPA_TOKEN이 설정되어 있지 않습니다. backend/.env에 BRITY_RPA_TOKEN을 설정해주세요.');
+      }
+
+      console.log(`📡 Brity RPA 등록 스케줄 API 호출: ${endpoint}`);
       console.log(`📅 기간: ${startDate} ~ ${endDate}`);
       
-      // 날짜를 UTC ISO 8601 형식으로 변환
-      const startDatetime = `${startDate}T00:00:00Z`;
-      const endDatetime = `${endDate}T23:59:59Z`;
+      // schedulings/list 는 보통 "YYYY-MM-DD HH:mm" 형태를 기대 (명세/샘플 기준)
+      const startDatetime = `${startDate} 00:00`;
+      const endDatetime = `${endDate} 23:59`;
       
       // 요청 본문 구성
       const requestBody = {
         offset: offset,
         limit: limit,
-        orderBy: 'startTime desc',
+        // 최신 등록/표시 기준 정렬(환경마다 다를 수 있어, 없으면 scheduledTime asc로 바꿔도 됨)
+        orderBy: 'regTimeselectScheduleJobListForDisplay desc',
         parameter: {
-          startDatetime: startDatetime,
-          endDatetime: endDatetime
+          START_DATETIME: startDatetime,
+          END_DATETIME: endDatetime
         }
       };
       
@@ -44,26 +170,26 @@ class BrityRpaService {
         requestBody,
         {
           headers: {
-            'Authorization': process.env.BRITY_RPA_TOKEN || 'Bearer eyJhbGciOiJIUzI1NiJ9.eyJqdGkiOiIxNzY4Mjg1MjE4MTE3LWNiODBkMzQwLWEzMDVlN2I5IiwiaXNzIjoiQVVUSF9DTElFTlRfQ0VSVElGSUNBVEUiLCJhdWQiOiJBVVRIX0FQSV9TRVJWRVIiLCJzdWIiOiJBQ0NFU1NfVE9LRU4iLCJjbGllbnRUeXBlIjoiQVBJX0tFWSIsImNsaWVudElkIjoiQVVUSF9BUElfU0VSVkVSIiwidXNlcklkIjoieW91bmdqb29uLmtpbUBham5ldC5jby5rciIsImNoYWxsZW5nZSI6IjE3NjgyODUyMTgxMTctNDJlNmJiODgtM2RmODUyNjciLCJpcEFkZHIiOiIxODIuMTk1LjgzLjQiLCJ0ZW5hbnRJZCI6IlROXzljN2Y0NTU0MDcyODQzMDU5NDhmYTI0OTkyNjhmYTZkIiwic2VjdXJpdHlUeXBlIjoidjIiLCJpYXQiOjE3NjgyODUyMTgsImV4cCI6MTc5ODcyOTE5OX0.yDJaRz9oTq1cyjleFSoTHBpicd9LM810jRcQIpNfTE0',
+            'Authorization': process.env.BRITY_RPA_TOKEN,
             'Content-Type': 'application/json'
           },
           timeout: 30000
         }
       );
 
-      console.log(`✅ API 응답 수신: totalCount=${response.data.totalCount}, listCount=${response.data.listCount}, list.length=${response.data.list?.length || 0}`);
+      const rawList = response.data.list || [];
+      const totalCount = response.data.totalCount || rawList.length || 0;
+      const listCount = response.data.listCount || rawList.length || 0;
 
-      const jobs = response.data.list || [];
-      const totalCount = response.data.totalCount || 0;
-      const listCount = response.data.listCount || jobs.length;
+      console.log(`✅ API 응답 수신: totalCount=${totalCount}, listCount=${listCount}, list.length=${rawList.length}`);
 
       // 모든 데이터를 수집할 배열
-      let allJobs = [...jobs];
+      let allSchedules = [...rawList];
       let currentOffset = offset + listCount;
 
       // totalCount가 현재까지 가져온 데이터보다 크면 추가 조회 필요
-      if (totalCount > allJobs.length) {
-        console.log(`📥 Pagination 필요: 현재=${allJobs.length}개, 전체=${totalCount}개, 남은 건수=${totalCount - allJobs.length}`);
+      if (totalCount > allSchedules.length) {
+        console.log(`📥 Pagination 필요: 현재=${allSchedules.length}개, 전체=${totalCount}개, 남은 건수=${totalCount - allSchedules.length}`);
         
         // limit이 100 미만이고 totalCount가 limit보다 크면 100으로 증가하여 재조회 (더 효율적)
         if (limit < 100 && totalCount > limit) {
@@ -75,18 +201,18 @@ class BrityRpaService {
         // limit이 100이거나 이미 최대인 경우, offset 기반 pagination
         // 모든 데이터를 가져올 때까지 반복
         const maxLimit = limit >= 100 ? 100 : limit;
-        while (allJobs.length < totalCount) {
+        while (allSchedules.length < totalCount) {
           const nextOffset = currentOffset;
-          console.log(`📥 추가 데이터 조회: offset=${nextOffset}, 현재까지=${allJobs.length}개, 전체=${totalCount}개, 남은 건수=${totalCount - nextOffset}`);
+          console.log(`📥 추가 데이터 조회: offset=${nextOffset}, 현재까지=${allSchedules.length}개, 전체=${totalCount}개, 남은 건수=${totalCount - nextOffset}`);
           
           // 다음 배치 조회
           const nextRequestBody = {
             offset: nextOffset,
             limit: maxLimit, // 최대 100
-            orderBy: 'startTime desc',
+            orderBy: 'regTimeselectScheduleJobListForDisplay desc',
             parameter: {
-              startDatetime: `${startDate}T00:00:00Z`,
-              endDatetime: `${endDate}T23:59:59Z`
+              START_DATETIME: `${startDate} 00:00`,
+              END_DATETIME: `${endDate} 23:59`
             }
           };
           
@@ -95,97 +221,85 @@ class BrityRpaService {
             nextRequestBody,
             {
               headers: {
-                'Authorization': process.env.BRITY_RPA_TOKEN || 'Bearer eyJhbGciOiJIUzI1NiJ9.eyJqdGkiOiIxNzY4Mjg1MjE4MTE3LWNiODBkMzQwLWEzMDVlN2I5IiwiaXNzIjoiQVVUSF9DTElFTlRfQ0VSVElGSUNBVEUiLCJhdWQiOiJBVVRIX0FQSV9TRVJWRVIiLCJzdWIiOiJBQ0NFU1NfVE9LRU4iLCJjbGllbnRUeXBlIjoiQVBJX0tFWSIsImNsaWVudElkIjoiQVVUSF9BUElfU0VSVkVSIiwidXNlcklkIjoieW91bmdqb29uLmtpbUBham5ldC5jby5rciIsImNoYWxsZW5nZSI6IjE3NjgyODUyMTgxMTctNDJlNmJiODgtM2RmODUyNjciLCJpcEFkZHIiOiIxODIuMTk1LjgzLjQiLCJ0ZW5hbnRJZCI6IlROXzljN2Y0NTU0MDcyODQzMDU5NDhmYTI0OTkyNjhmYTZkIiwic2VjdXJpdHlUeXBlIjoidjIiLCJpYXQiOjE3NjgyODUyMTgsImV4cCI6MTc5ODcyOTE5OX0.yDJaRz9oTq1cyjleFSoTHBpicd9LM810jRcQIpNfTE0',
+                'Authorization': process.env.BRITY_RPA_TOKEN,
                 'Content-Type': 'application/json'
               },
               timeout: 30000
             }
           );
           
-          const nextJobs = nextResponse.data.list || [];
-          const nextListCount = nextResponse.data.listCount || nextJobs.length;
+          const nextList = nextResponse.data.list || [];
+          const nextListCount = nextResponse.data.listCount || nextList.length;
           
-          if (nextJobs.length === 0) {
+          if (nextList.length === 0) {
             console.log(`⚠️ 더 이상 데이터가 없습니다.`);
             break;
           }
           
-          allJobs.push(...nextJobs);
-          currentOffset = allJobs.length; // 실제 수집된 데이터 수로 업데이트
+          allSchedules.push(...nextList);
+          currentOffset = allSchedules.length; // 실제 수집된 데이터 수로 업데이트
           
-          console.log(`📥 조회 완료: 이번 배치=${nextJobs.length}개, 누적=${allJobs.length}개 / ${totalCount}개`);
+          console.log(`📥 조회 완료: 이번 배치=${nextList.length}개, 누적=${allSchedules.length}개 / ${totalCount}개`);
           
           // 더 이상 가져올 데이터가 없으면 종료
-          if (nextJobs.length === 0 || allJobs.length >= totalCount || nextListCount < maxLimit) {
+          if (nextList.length === 0 || allSchedules.length >= totalCount || nextListCount < maxLimit) {
             break;
           }
         }
       }
       
-      console.log(`📊 전체 데이터 수집 완료: ${allJobs.length}개 / ${totalCount}개`);
+      console.log(`📊 전체 데이터 수집 완료: ${allSchedules.length}개 / ${totalCount}개`);
 
-      // Job 수행 결과 데이터 정규화
+      // 등록 스케줄 데이터 정규화
       const normalizedSchedules = [];
       
-      for (const job of allJobs) {
-        // startTime이 없는 경우 제외
-        if (!job.startTime) {
-          console.log(`⏭️ Job 건너뜀 (startTime 없음): ${job.jobId}`);
+      for (const s of allSchedules) {
+        // 삭제/비활성 스케줄 제외
+        if (s.delYn === 'Y' || s.inActiveYn === 'Y') continue;
+
+        const startTime = s.nextJobTime || s.startTime || s.scheduledTime;
+        if (!startTime) {
+          console.log(`⏭️ 스케줄 건너뜀 (startTime/nextJobTime 없음): ${s.id}`);
           continue;
         }
         
         // botId 또는 botName이 없는 경우 제외
-        const botId = job.botId || '';
-        const botName = job.botName || job.botId || '';
+        const botId = s.botId || '';
+        const botName = s.botName || s.botId || '';
         
         if (!botId && !botName) {
-          console.log(`⏭️ Job 건너뜀 (botId/botName 없음): ${job.jobId}`);
+          console.log(`⏭️ 스케줄 건너뜀 (botId/botName 없음): ${s.id}`);
           continue;
         }
 
-        // startTime과 endTime 사용
-        const startTime = job.startTime;
-        // endTime이 없으면 startTime + 기본 1분 (실제 실행 시간이 짧을 수 있음)
-        const endTime = job.endTime || (() => {
+        // 종료 시간은 등록 스케줄 API에 명확히 없을 수 있어 기본 1시간으로 잡음
+        const endTime = (() => {
           const start = new Date(startTime);
-          start.setMinutes(start.getMinutes() + 1);
+          start.setMinutes(start.getMinutes() + 60);
           return start.toISOString();
         })();
 
-        // processName을 subject로 사용
-        const subject = job.processName || job.jobId || '제목 없음';
-
-        // resultCode 매핑 (detailCode: "1" = SUCCESS, "2" = FAIL 등)
-        // statusCode: "4" = JOB_END
-        let resultCode = null;
-        if (job.detailCode) {
-          // detailCode를 resultCode로 매핑
-          // "1" = SUCCESS → 1, 그 외는 2 (실패)
-          resultCode = job.detailCode === "1" ? 1 : 2;
-        }
+        // 제목은 jobScheduleName/processName 우선
+        const subject = s.jobScheduleName || s.scheduleName || s.processName || s.id || '제목 없음';
 
         normalizedSchedules.push({
-          id: job.jobId,
+          id: s.id,
           botId: botId,
           botName: botName,
-          processId: job.processId,
-          processName: job.processName,
+          processId: s.processId,
+          processName: s.processName,
           subject: subject,
           start: startTime,
           end: endTime,
-          body: job.processName || '',
+          body: s.description || s.processName || '',
           sourceSystem: 'BRITY_RPA',
-          // Job 수행 결과 추가 정보
-          jobId: job.jobId,
-          scheduledTime: job.scheduledTime,
-          statusCode: job.statusCode,
-          statusName: job.statusName,
-          detailCode: job.detailCode,
-          detailName: job.detailName,
-          resultCode: resultCode,
-          jobUser: job.jobUser,
-          projectName: job.projectName,
-          version: job.version
+          // 추가 필드(디버깅/표시용)
+          nextJobTime: s.nextJobTime,
+          startTime: s.startTime,
+          schUntil: s.schUntil,
+          timeRepeatYn: s.timeRepeatYn,
+          timeRepeatInterval: s.timeRepeatInterval,
+          regTime: s.regTimeselectScheduleJobListForDisplay
         });
       }
       
