@@ -101,10 +101,10 @@ router.post('/rpa-schedules', async (req, res) => {
     
     // 1단계: Brity RPA API에서 스케줄 조회
     // britySource:
-    // - 'schedulings' (기본): /schedulings/list (등록된 스케줄, 미래 포함)
-    // - 'jobs': /jobs/list (실행 이력/결과, 미래 일정 거의 없음)
+    // - 'jobs' (기본): /jobs/list (실행 이력/결과)
+    // - 'schedulings': /schedulings/list (등록된 스케줄, 미래 포함)
     const effectiveBritySource = String(
-      britySource || process.env.BRITY_SYNC_SOURCE || 'schedulings'
+      britySource || process.env.BRITY_SYNC_SOURCE || 'jobs'
     ).toLowerCase();
 
     let schedules = [];

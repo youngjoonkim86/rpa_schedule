@@ -1,4 +1,5 @@
 const cron = require('node-cron');
+const moment = require('moment-timezone');
 
 // 동적 로딩 (에러 방지)
 let brityRpaService, powerAutomateService, Schedule, db, redis;
@@ -38,8 +39,17 @@ if (brityRpaService && Schedule && db) {
     
     console.log(`📅 동기화 기간: ${startDateStr} ~ ${endDateStr} (당월 기준 -7일 ~ 1년 후)`);
     
-    // 1단계: Brity RPA API에서 스케줄 조회
-    const schedules = await brityRpaService.getSchedules(startDateStr, endDateStr);
+    // 1단계: Brity RPA API에서 조회 (기본: /jobs/list)
+    const effectiveBritySource = String(process.env.BRITY_SYNC_SOURCE || 'jobs').toLowerCase();
+    let schedules = [];
+    if (effectiveBritySource === 'schedulings') {
+      schedules = await brityRpaService.getSchedules(startDateStr, endDateStr);
+    } else {
+      const tz = 'Asia/Seoul';
+      const startIso = moment.tz(startDateStr, 'YYYY-MM-DD', tz).startOf('day').toISOString();
+      const endIso = moment.tz(endDateStr, 'YYYY-MM-DD', tz).endOf('day').toISOString();
+      schedules = await brityRpaService.getJobResults(startIso, endIso);
+    }
     
     let syncCount = 0;
     let errorCount = 0;
