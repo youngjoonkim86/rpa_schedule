@@ -4,6 +4,7 @@ const brityRpaService = require('../services/brityRpaService');
 const powerAutomateService = require('../services/powerAutomateService');
 const Schedule = require('../models/Schedule');
 const db = require('../config/database');
+const moment = require('moment-timezone');
 
 /**
  * GET /api/sync/logs - 동기화 로그 조회
@@ -79,7 +80,7 @@ router.get('/status', async (req, res) => {
  */
 router.post('/rpa-schedules', async (req, res) => {
   try {
-    let { startDate, endDate } = req.body;
+    let { startDate, endDate, britySource } = req.body;
     
     // startDate와 endDate가 없으면 당월 기준 -7일 ~ 1년 후로 설정
     if (!startDate || !endDate) {
@@ -99,8 +100,24 @@ router.post('/rpa-schedules', async (req, res) => {
     console.log(`🔄 Brity RPA 동기화 시작: ${startDate} ~ ${endDate}`);
     
     // 1단계: Brity RPA API에서 스케줄 조회
-    console.log('📋 1단계: RPA 등록 스케줄 조회 (Brity RPA API)');
-    const schedules = await brityRpaService.getSchedules(startDate, endDate);
+    // britySource:
+    // - 'schedulings' (기본): /schedulings/list (등록된 스케줄, 미래 포함)
+    // - 'jobs': /jobs/list (실행 이력/결과, 미래 일정 거의 없음)
+    const effectiveBritySource = String(
+      britySource || process.env.BRITY_SYNC_SOURCE || 'schedulings'
+    ).toLowerCase();
+
+    let schedules = [];
+    if (effectiveBritySource === 'jobs') {
+      console.log('📋 1단계: Brity 실행 결과 조회 (/jobs/list)');
+      const tz = 'Asia/Seoul';
+      const startIso = moment.tz(startDate, 'YYYY-MM-DD', tz).startOf('day').toISOString();
+      const endIso = moment.tz(endDate, 'YYYY-MM-DD', tz).endOf('day').toISOString();
+      schedules = await brityRpaService.getJobResults(startIso, endIso);
+    } else {
+      console.log('📋 1단계: RPA 등록 스케줄 조회 (/schedulings/list)');
+      schedules = await brityRpaService.getSchedules(startDate, endDate);
+    }
     console.log(`✅ ${schedules.length}개 스케줄 조회 완료\n`);
     
     let syncCount = 0;
