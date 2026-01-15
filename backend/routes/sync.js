@@ -6,6 +6,7 @@ const Schedule = require('../models/Schedule');
 const db = require('../config/database');
 const moment = require('moment-timezone');
 const redis = require('../config/redis');
+const { groupSchedulesByTimeBucket } = require('../utils/scheduleGrouping');
 
 // ✅ 동기화 "진행 중" 상태(메모리)
 // - 프론트가 DB 적재가 끝날 때까지 "동기화 중" 표시를 유지할 수 있도록 진행률 제공
@@ -231,6 +232,29 @@ router.post('/rpa-schedules', async (req, res) => {
       for (const s of schedules) map.set(uniqueKey(s), s);
       schedules = Array.from(map.values());
       brityDebug.merged.afterDedupe = schedules.length;
+
+    // Power Automate 설정 여부(그룹핑/등록 로직에서 공통 사용)
+    const powerAutomateEnabled =
+      !!process.env.POWER_AUTOMATE_QUERY_URL && !!process.env.POWER_AUTOMATE_CREATE_URL;
+
+    // (옵션) DB 저장 row 수 절감을 위한 시간 버킷 그룹핑
+    // - PA 자동 등록과 충돌할 수 있어, PA 사용 시에는 기본적으로 비활성 권장
+    const bucketMinutesRaw = parseInt(process.env.BRITY_GROUP_BUCKET_MINUTES || '0', 10);
+    const shouldGroup =
+      Number.isFinite(bucketMinutesRaw) && bucketMinutesRaw > 0 && bucketMinutesRaw % 5 === 0;
+    if (shouldGroup && !powerAutomateEnabled) {
+      const before = schedules.length;
+      schedules = groupSchedulesByTimeBucket(schedules, bucketMinutesRaw, tz);
+      const after = schedules.length;
+      brityDebug.grouping = { enabled: true, bucketMinutes: bucketMinutesRaw, before, after };
+      console.log(`🧺 그룹핑 저장 활성화: ${bucketMinutesRaw}분 버킷 (${before} → ${after})`);
+    } else if (shouldGroup && powerAutomateEnabled) {
+      brityDebug.grouping = {
+        enabled: false,
+        reason: 'POWER_AUTOMATE 사용 중에는 그룹핑 저장을 비활성(정확한 시간/중복 방지)',
+        bucketMinutes: bucketMinutesRaw
+      };
+    }
     } else {
       console.log('📋 1단계: RPA 등록 스케줄 조회 (/schedulings/list)');
       const schedRes = await brityRpaService.getSchedulesWithMeta(startDate, endDate);
@@ -247,8 +271,6 @@ router.post('/rpa-schedules', async (req, res) => {
     let registeredCount = 0;
     let skippedCount = 0;
 
-    const powerAutomateEnabled =
-      !!process.env.POWER_AUTOMATE_QUERY_URL && !!process.env.POWER_AUTOMATE_CREATE_URL;
     // PA가 502 등으로 불안정할 때 동기화가 "끝없이 느려지고 타임아웃" 나는 걸 방지
     // - 첫 번째 치명적 실패를 감지하면 해당 run에서는 PA 조회/등록을 즉시 중단
     let powerAutomateAvailable = powerAutomateEnabled;

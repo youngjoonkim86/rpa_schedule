@@ -2,7 +2,7 @@ const cron = require('node-cron');
 const moment = require('moment-timezone');
 
 // 동적 로딩 (에러 방지)
-let brityRpaService, powerAutomateService, Schedule, db, redis;
+let brityRpaService, powerAutomateService, Schedule, db, redis, groupSchedulesByTimeBucket;
 
 try {
   brityRpaService = require('../services/brityRpaService');
@@ -10,6 +10,7 @@ try {
   Schedule = require('../models/Schedule');
   db = require('../config/database');
   redis = require('../config/redis');
+  ({ groupSchedulesByTimeBucket } = require('../utils/scheduleGrouping'));
 } catch (error) {
   console.warn('⚠️ 동기화 작업 초기화 실패 (계속 진행):', error.message);
 }
@@ -78,6 +79,17 @@ if (brityRpaService && Schedule && db) {
       const map = new Map();
       for (const s of schedules) map.set(uniqueKey(s), s);
       schedules = Array.from(map.values());
+    }
+
+    // (옵션) DB 저장 row 수 절감을 위한 시간 버킷 그룹핑
+    const bucketMinutesRaw = parseInt(process.env.BRITY_GROUP_BUCKET_MINUTES || '0', 10);
+    const shouldGroup =
+      Number.isFinite(bucketMinutesRaw) && bucketMinutesRaw > 0 && bucketMinutesRaw % 5 === 0;
+    if (shouldGroup && !AUTO_REGISTER_TO_POWER_AUTOMATE) {
+      const before = schedules.length;
+      schedules = groupSchedulesByTimeBucket(schedules, bucketMinutesRaw, tz);
+      const after = schedules.length;
+      console.log(`🧺(자동) 그룹핑 저장 활성화: ${bucketMinutesRaw}분 버킷 (${before} → ${after})`);
     }
     
     let syncCount = 0;
