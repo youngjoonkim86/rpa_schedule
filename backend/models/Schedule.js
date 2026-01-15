@@ -228,6 +228,39 @@ class Schedule {
   }
 
   /**
+   * 소스 시스템 + 날짜 범위에 해당하는 일정들을 "교체(replace)"하기 위해 소프트 삭제
+   * - 그룹핑 저장을 켠 경우, 기존(원본) 데이터와 섞여 캘린더에서 과다/부족처럼 보이는 문제를 방지
+   *
+   * @param {Object} params
+   * @param {string} params.sourceSystem 예: 'BRITY_RPA'
+   * @param {string} params.startDate YYYY-MM-DD
+   * @param {string} params.endDate YYYY-MM-DD
+   * @returns {number} affected rows (가능한 경우)
+   */
+  static async softDeleteBySourceInRange({ sourceSystem, startDate, endDate }) {
+    if (!(await ensureConnection())) {
+      throw new Error('데이터베이스 연결이 없습니다.');
+    }
+    if (!sourceSystem) throw new Error('sourceSystem이 필요합니다.');
+    if (!startDate || !endDate) throw new Error('startDate/endDate가 필요합니다.');
+
+    const start = `${startDate} 00:00:00`;
+    const end = `${endDate} 23:59:59`;
+
+    const [result] = await db.execute(
+      `UPDATE bot_schedules
+       SET status = 'DELETED', updated_at = CURRENT_TIMESTAMP
+       WHERE status = 'ACTIVE'
+         AND source_system = ?
+         AND start_datetime < DATE_ADD(?, INTERVAL 1 DAY)
+         AND end_datetime > ?`,
+      [sourceSystem, endDate, startDate]
+    );
+
+    return result?.affectedRows ?? 0;
+  }
+
+  /**
    * Upsert (있으면 업데이트, 없으면 생성)
    * 중복 체크: 
    * 1. bot_id + start_datetime + end_datetime (정확한 시간 일치)

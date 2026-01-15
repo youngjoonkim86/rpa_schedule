@@ -170,6 +170,20 @@ if (brityRpaService && Schedule && db) {
     }
 
     // 3단계: DB 적재(그룹핑 기준)
+    // ✅ 그룹핑이 켜진 경우: 기존 BRITY_RPA 데이터를 기간 내에서 교체(replace)
+    if (shouldGroup) {
+      try {
+        const deleted = await Schedule.softDeleteBySourceInRange({
+          sourceSystem: 'BRITY_RPA',
+          startDate: startDateStr,
+          endDate: endDateStr
+        });
+        console.log(`🧹(자동) 그룹핑 replace: 기존 BRITY_RPA ${deleted}건 소프트삭제 (${startDateStr}~${endDateStr})`);
+      } catch (e) {
+        console.warn('⚠️(자동) 그룹핑 replace 실패(계속 진행):', e.message);
+      }
+    }
+
     for (const schedule of schedulesForDb) {
       try {
         const botIdForDb = schedule.botId || schedule.botName;

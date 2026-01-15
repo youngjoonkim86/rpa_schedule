@@ -353,6 +353,23 @@ router.post('/rpa-schedules', async (req, res) => {
     }
 
     // 3단계: DB 적재(그룹핑 기준)
+    // ✅ 그룹핑이 켜진 경우: 기존 BRITY_RPA 데이터를 기간 내에서 교체(replace)하여
+    //    "원본 + 그룹핑"이 섞여 보이는 문제를 방지
+    if (shouldGroup) {
+      try {
+        const deleted = await Schedule.softDeleteBySourceInRange({
+          sourceSystem: 'BRITY_RPA',
+          startDate,
+          endDate
+        });
+        brityDebug.grouping.replaced = { enabled: true, deleted };
+        console.log(`🧹 그룹핑 replace: 기존 BRITY_RPA ${deleted}건 소프트삭제 (${startDate}~${endDate})`);
+      } catch (e) {
+        console.warn('⚠️ 그룹핑 replace 실패(계속 진행):', e.message);
+        brityDebug.grouping.replaced = { enabled: true, error: e.message };
+      }
+    }
+
     for (const schedule of schedulesForDb) {
       try {
         currentSync.progress.processed += 1;
