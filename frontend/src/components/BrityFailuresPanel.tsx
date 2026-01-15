@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Button, Card, Collapse, Empty, Space, Spin, Table, Typography, message } from 'antd';
+import { Button, Card, Collapse, DatePicker, Empty, Space, Spin, Table, Typography, message } from 'antd';
 import dayjs from 'dayjs';
 import { brityApi, BrityFailureBucket, BrityFailureJobItem } from '../services/api';
 
@@ -16,11 +16,13 @@ const BrityFailuresPanel: React.FC<Props> = ({ intervalMinutes = 10 }) => {
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string>('');
 
   const today = useMemo(() => dayjs().format('YYYY-MM-DD'), []);
+  const [selectedDate, setSelectedDate] = useState<string>(today);
 
-  const fetchFailures = async () => {
+  const fetchFailures = async (dateStr?: string) => {
     setLoading(true);
     try {
-      const res = await brityApi.getFailures(today, intervalMinutes);
+      const dateToUse = dateStr || selectedDate;
+      const res = await brityApi.getFailures(dateToUse, intervalMinutes);
       setBuckets(res.data.buckets || []);
       setTotalFailed(res.data.totalFailed || 0);
       setLastUpdatedAt(dayjs().format('YYYY-MM-DD HH:mm:ss'));
@@ -32,13 +34,17 @@ const BrityFailuresPanel: React.FC<Props> = ({ intervalMinutes = 10 }) => {
     }
   };
 
-  // 최초 로드 + 10분마다 자동 갱신
+  // 최초 로드 + (오늘을 보고 있을 때만) 10분마다 자동 갱신
   useEffect(() => {
-    fetchFailures();
-    const timer = window.setInterval(fetchFailures, 10 * 60 * 1000);
+    fetchFailures(selectedDate);
+
+    // 과거 날짜를 보고 있을 때는 자동 갱신 불필요
+    if (selectedDate !== today) return;
+
+    const timer = window.setInterval(() => fetchFailures(selectedDate), 10 * 60 * 1000);
     return () => window.clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [selectedDate]);
 
   const columns = [
     {
@@ -80,11 +86,40 @@ const BrityFailuresPanel: React.FC<Props> = ({ intervalMinutes = 10 }) => {
   return (
     <Card
       style={{ marginTop: 16 }}
-      title={`금일 Brity RPA 실패 내역 (${intervalMinutes}분 단위)`}
+      title={`Brity RPA 실패 내역 (${intervalMinutes}분 단위)`}
       extra={
         <Space>
+          <DatePicker
+            value={dayjs(selectedDate)}
+            format="YYYY-MM-DD"
+            allowClear={false}
+            onChange={(v) => {
+              const next = v ? v.format('YYYY-MM-DD') : today;
+              setSelectedDate(next);
+              fetchFailures(next);
+            }}
+          />
+          <Button
+            onClick={() => {
+              const next = dayjs().subtract(1, 'day').format('YYYY-MM-DD');
+              setSelectedDate(next);
+              fetchFailures(next);
+            }}
+            disabled={loading}
+          >
+            어제
+          </Button>
+          <Button
+            onClick={() => {
+              setSelectedDate(today);
+              fetchFailures(today);
+            }}
+            disabled={loading}
+          >
+            오늘
+          </Button>
           {lastUpdatedAt && <Text type="secondary">업데이트: {lastUpdatedAt}</Text>}
-          <Button onClick={fetchFailures} disabled={loading}>
+          <Button onClick={() => fetchFailures(selectedDate)} disabled={loading}>
             새로고침
           </Button>
         </Space>
