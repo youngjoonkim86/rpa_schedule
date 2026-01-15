@@ -107,13 +107,43 @@ router.post('/rpa-schedules', async (req, res) => {
       britySource || process.env.BRITY_SYNC_SOURCE || 'jobs'
     ).toLowerCase();
 
+    const tz = 'Asia/Seoul';
+    const todayStr = moment.tz(tz).format('YYYY-MM-DD');
+
+    const uniqueKey = (s) => {
+      const bot = s.botId || s.botName || '';
+      const subj = s.subject || '';
+      const start = s.start || '';
+      const end = s.end || '';
+      return `${bot}||${subj}||${start}||${end}`;
+    };
+
     let schedules = [];
     if (effectiveBritySource === 'jobs') {
-      console.log('📋 1단계: Brity 실행 결과 조회 (/jobs/list)');
-      const tz = 'Asia/Seoul';
-      const startIso = moment.tz(startDate, 'YYYY-MM-DD', tz).startOf('day').toISOString();
-      const endIso = moment.tz(endDate, 'YYYY-MM-DD', tz).endOf('day').toISOString();
-      schedules = await brityRpaService.getJobResults(startIso, endIso);
+      // 기본: /jobs/list (실행 이력)
+      // + 미래(오늘 이후) 일정은 /schedulings/list 로 추가 조회하여 캘린더에 표시되게 함
+      console.log('📋 1단계: Brity 실행 결과 조회 (/jobs/list) + 미래 등록 스케줄 병합(/schedulings/list)');
+
+      // jobs 구간: startDate ~ min(endDate, today)
+      const jobsEnd = endDate < todayStr ? endDate : todayStr;
+      if (startDate <= jobsEnd) {
+        const startIso = moment.tz(startDate, 'YYYY-MM-DD', tz).startOf('day').toISOString();
+        const endIso = moment.tz(jobsEnd, 'YYYY-MM-DD', tz).endOf('day').toISOString();
+        const jobSchedules = await brityRpaService.getJobResults(startIso, endIso);
+        schedules.push(...jobSchedules);
+      }
+
+      // schedulings 구간: max(startDate, today) ~ endDate (오늘 이후 포함)
+      const schedStart = startDate > todayStr ? startDate : todayStr;
+      if (schedStart <= endDate) {
+        const futureSchedules = await brityRpaService.getSchedules(schedStart, endDate);
+        schedules.push(...futureSchedules);
+      }
+
+      // 중복 제거
+      const map = new Map();
+      for (const s of schedules) map.set(uniqueKey(s), s);
+      schedules = Array.from(map.values());
     } else {
       console.log('📋 1단계: RPA 등록 스케줄 조회 (/schedulings/list)');
       schedules = await brityRpaService.getSchedules(startDate, endDate);

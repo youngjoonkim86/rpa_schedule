@@ -41,14 +41,38 @@ if (brityRpaService && Schedule && db) {
     
     // 1단계: Brity RPA API에서 조회 (기본: /jobs/list)
     const effectiveBritySource = String(process.env.BRITY_SYNC_SOURCE || 'jobs').toLowerCase();
+    const tz = 'Asia/Seoul';
+    const todayStr = moment.tz(tz).format('YYYY-MM-DD');
+
+    const uniqueKey = (s) => {
+      const bot = s.botId || s.botName || '';
+      const subj = s.subject || '';
+      const start = s.start || '';
+      const end = s.end || '';
+      return `${bot}||${subj}||${start}||${end}`;
+    };
+
     let schedules = [];
     if (effectiveBritySource === 'schedulings') {
       schedules = await brityRpaService.getSchedules(startDateStr, endDateStr);
     } else {
-      const tz = 'Asia/Seoul';
-      const startIso = moment.tz(startDateStr, 'YYYY-MM-DD', tz).startOf('day').toISOString();
-      const endIso = moment.tz(endDateStr, 'YYYY-MM-DD', tz).endOf('day').toISOString();
-      schedules = await brityRpaService.getJobResults(startIso, endIso);
+      // 기본: /jobs/list (실행 이력)
+      // + 미래(오늘 이후) 일정은 /schedulings/list 로 추가 조회
+      const jobsEnd = endDateStr < todayStr ? endDateStr : todayStr;
+      if (startDateStr <= jobsEnd) {
+        const startIso = moment.tz(startDateStr, 'YYYY-MM-DD', tz).startOf('day').toISOString();
+        const endIso = moment.tz(jobsEnd, 'YYYY-MM-DD', tz).endOf('day').toISOString();
+        schedules.push(...(await brityRpaService.getJobResults(startIso, endIso)));
+      }
+
+      const schedStart = startDateStr > todayStr ? startDateStr : todayStr;
+      if (schedStart <= endDateStr) {
+        schedules.push(...(await brityRpaService.getSchedules(schedStart, endDateStr)));
+      }
+
+      const map = new Map();
+      for (const s of schedules) map.set(uniqueKey(s), s);
+      schedules = Array.from(map.values());
     }
     
     let syncCount = 0;
