@@ -85,11 +85,12 @@ if (brityRpaService && Schedule && db) {
     const bucketMinutesRaw = parseInt(process.env.BRITY_GROUP_BUCKET_MINUTES || '0', 10);
     const shouldGroup =
       Number.isFinite(bucketMinutesRaw) && bucketMinutesRaw > 0 && bucketMinutesRaw % 5 === 0;
-    if (shouldGroup && !AUTO_REGISTER_TO_POWER_AUTOMATE) {
-      const before = schedules.length;
-      schedules = groupSchedulesByTimeBucket(schedules, bucketMinutesRaw, tz);
-      const after = schedules.length;
-      console.log(`🧺(자동) 그룹핑 저장 활성화: ${bucketMinutesRaw}분 버킷 (${before} → ${after})`);
+    const schedulesForPa = schedules; // 원본(정확한 시간)
+    const schedulesForDb = shouldGroup
+      ? groupSchedulesByTimeBucket(schedules, bucketMinutesRaw, tz)
+      : schedules;
+    if (shouldGroup) {
+      console.log(`🧺(자동) DB 그룹핑 저장: ${bucketMinutesRaw}분 버킷 (raw ${schedulesForPa.length} → db ${schedulesForDb.length})`);
     }
     
     let syncCount = 0;
@@ -99,26 +100,13 @@ if (brityRpaService && Schedule && db) {
     const powerAutomateEnabled =
       !!process.env.POWER_AUTOMATE_QUERY_URL && !!process.env.POWER_AUTOMATE_CREATE_URL;
     let powerAutomateAvailable = AUTO_REGISTER_TO_POWER_AUTOMATE && powerAutomateService && powerAutomateEnabled;
-    
-    // 2단계: 각 스케줄 처리
-    for (const schedule of schedules) {
-      try {
-        // 0단계: DB에 이미 있는지 확인
-        const botIdForDb = schedule.botId || schedule.botName;
-        const existsInDb = await Schedule.existsExactActive({
-          botId: botIdForDb,
-          subject: schedule.subject,
-          startIso: schedule.start,
-          endIso: schedule.end
-        });
-        const skipDbUpsert = !!existsInDb;
 
-        // Power Automate 자동 등록이 활성화된 경우에만 실행
-        if (powerAutomateAvailable) {
-          // 2-1: Power Automate에서 BOT 일정 조회
+    // 2단계: Power Automate 처리(원본 기준)
+    if (powerAutomateAvailable) {
+      for (const schedule of schedulesForPa) {
+        try {
           let existsInPowerAutomate = false;
           try {
-            // 조회 범위를 넓혀서 중복 체크 (시작 시간 ±1시간)
             const queryStart = new Date(schedule.start);
             queryStart.setHours(queryStart.getHours() - 1);
             const queryEnd = new Date(schedule.end);
@@ -128,31 +116,30 @@ if (brityRpaService && Schedule && db) {
               queryStart.toISOString(),
               queryEnd.toISOString()
             );
-            
+
             if (queryResult.events && Array.isArray(queryResult.events)) {
               existsInPowerAutomate = queryResult.events.some(event => {
                 const eventStart = new Date(event.start?.dateTime || event.start);
                 const eventEnd = new Date(event.end?.dateTime || event.end);
                 const scheduleStart = new Date(schedule.start);
                 const scheduleEnd = new Date(schedule.end);
-                
-                // BOT 이름이 일치하고 시간이 겹치는지 확인 (botName 사용)
-                const botMatch = event.bot === schedule.botName || 
-                                event.bot === schedule.botId ||
-                                event.subject?.includes(schedule.botName) ||
-                                event.subject?.includes(schedule.botId) ||
-                                event.subject === schedule.subject;
-                
-                // 시간이 정확히 일치하거나 겹치는지 확인 (5분 이내 차이는 동일한 것으로 간주)
+
+                const botMatch =
+                  event.bot === schedule.botName ||
+                  event.bot === schedule.botId ||
+                  event.subject?.includes(schedule.botName) ||
+                  event.subject?.includes(schedule.botId) ||
+                  event.subject === schedule.subject;
+
                 const timeDiff = Math.abs(eventStart.getTime() - scheduleStart.getTime());
-                const timeOverlap = (eventStart <= scheduleEnd && eventEnd >= scheduleStart) ||
-                                   (timeDiff < 5 * 60 * 1000);
-                
+                const timeOverlap =
+                  (eventStart <= scheduleEnd && eventEnd >= scheduleStart) ||
+                  (timeDiff < 5 * 60 * 1000);
+
                 return botMatch && timeOverlap;
               });
             }
           } catch (queryError) {
-            // 조회 실패 시 등록하면 중복이 발생할 수 있으므로 안전하게 등록 생략
             existsInPowerAutomate = true;
             const status = queryError?.status || queryError?.response?.status;
             if (status === 502 || status === 503 || status === 504 || queryError.code === 'ETIMEDOUT') {
@@ -160,51 +147,54 @@ if (brityRpaService && Schedule && db) {
               console.warn(`🛑 Power Automate 임시 중단(자동 동기화): query failed (${status || queryError.code || 'unknown'})`);
             }
           }
-          
-          // 2-2: Power Automate에 일정이 없으면 등록
+
+          if (!powerAutomateAvailable) break;
+
           if (!existsInPowerAutomate) {
-            try {
-              // botName을 bot 필드에 매핑 (응답의 botName 값 사용)
-              const powerAutomateData = {
-                bot: schedule.botName, // botName을 bot 필드에 매핑
-                subject: schedule.subject,
-                start: {
-                  dateTime: schedule.start,
-                  timeZone: 'Asia/Seoul'
-                },
-                end: {
-                  dateTime: schedule.end,
-                  timeZone: 'Asia/Seoul'
-                },
-                body: schedule.body || `프로세스: ${schedule.processName || ''}`
-              };
-              
-              await powerAutomateService.createSchedule(powerAutomateData);
-              registeredCount++;
-            } catch (registerError) {
-              // 등록 실패해도 DB에는 저장
-            }
+            const powerAutomateData = {
+              bot: schedule.botName,
+              subject: schedule.subject,
+              start: { dateTime: schedule.start, timeZone: 'Asia/Seoul' },
+              end: { dateTime: schedule.end, timeZone: 'Asia/Seoul' },
+              body: schedule.body || `프로세스: ${schedule.processName || ''}`
+            };
+            await powerAutomateService.createSchedule(powerAutomateData);
+            registeredCount++;
           } else {
             skippedCount++;
           }
+        } catch (_) {
+          // PA 실패는 전체 동기화 실패로 보지 않음
         }
-        
-        // 3단계: DB에 저장 또는 업데이트 (중복이면 저장 스킵)
-        if (!skipDbUpsert) {
-          await Schedule.upsert({
-            bot_id: schedule.botId || schedule.botName, // botId가 없으면 botName 사용
-            bot_name: schedule.botName,
-            subject: schedule.subject,
-            start_datetime: schedule.start,
-            end_datetime: schedule.end,
-            body: schedule.body,
-            process_id: schedule.processId,
-            source_system: 'BRITY_RPA'
-          });
-          syncCount++;
-        } else {
+      }
+    }
+
+    // 3단계: DB 적재(그룹핑 기준)
+    for (const schedule of schedulesForDb) {
+      try {
+        const botIdForDb = schedule.botId || schedule.botName;
+        const existsInDb = await Schedule.existsExactActive({
+          botId: botIdForDb,
+          subject: schedule.subject,
+          startIso: schedule.start,
+          endIso: schedule.end
+        });
+        if (existsInDb) {
           skippedCount++;
+          continue;
         }
+
+        await Schedule.upsert({
+          bot_id: schedule.botId || schedule.botName,
+          bot_name: schedule.botName,
+          subject: schedule.subject,
+          start_datetime: schedule.start,
+          end_datetime: schedule.end,
+          body: schedule.body,
+          process_id: schedule.processId,
+          source_system: 'BRITY_RPA'
+        });
+        syncCount++;
       } catch (error) {
         console.error(`스케줄 처리 실패 (${schedule.id}):`, error.message);
         errorCount++;
