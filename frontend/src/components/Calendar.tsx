@@ -84,6 +84,9 @@ const Calendar: React.FC<CalendarProps> = ({ selectedBots, refreshTrigger }) => 
     const q = taskQuery.trim().toLowerCase();
 
     const filtered = schedules.filter((s: Schedule) => {
+      // "일정등록"은 필터 메뉴에서 제거하지만, 캘린더에서는 항상 보이게(내부 카테고리)
+      if (s.botId === '일정등록' || s.botName === '일정등록') return true;
+
       // 1) BOT 필터 (기존 캘린더 필터와 동일)
       const botOk =
         selectedBots.length === 0 ||
