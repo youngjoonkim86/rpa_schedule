@@ -189,13 +189,24 @@ router.post('/rpa-schedules', async (req, res) => {
     };
 
     let schedules = [];
+    let brityDebug = {
+      source: effectiveBritySource,
+      jobs: null,
+      schedulings: null,
+      merged: {
+        beforeDedupe: 0,
+        afterDedupe: 0
+      }
+    };
     if (effectiveBritySource === 'jobs') {
       // ✅ 실제 운영 환경에서 /jobs/list가 "오늘 이후"도 내려오는 케이스가 있어
       // start~end 전체 범위를 그대로 /jobs/list로 조회해야 합니다.
       console.log('📋 1단계: Brity 스케줄/이력 조회 (/jobs/list, 전체 범위)');
       const startIso = moment.tz(startDate, 'YYYY-MM-DD', tz).startOf('day').toISOString();
       const endIso = moment.tz(endDate, 'YYYY-MM-DD', tz).endOf('day').toISOString();
-      schedules = await brityRpaService.getJobResults(startIso, endIso);
+      const jobRes = await brityRpaService.getJobResultsWithMeta(startIso, endIso);
+      schedules = jobRes.items;
+      brityDebug.jobs = jobRes.meta;
 
       // 필요 시(환경별) 등록 스케줄 API도 병합할 수 있게 옵션 제공
       // - default: false (jobs/list만 사용)
@@ -203,17 +214,24 @@ router.post('/rpa-schedules', async (req, res) => {
       const mergeSchedulings = String(process.env.BRITY_SYNC_MERGE_SCHEDULINGS || 'false').toLowerCase() === 'true';
       if (mergeSchedulings) {
         console.log('➕ 옵션: /schedulings/* 병합 활성화');
-        const extra = await brityRpaService.getSchedules(startDate, endDate);
-        schedules = [...schedules, ...extra];
+        const schedRes = await brityRpaService.getSchedulesWithMeta(startDate, endDate);
+        brityDebug.schedulings = schedRes.meta;
+        schedules = [...schedules, ...schedRes.items];
       }
 
       // 중복 제거
+      brityDebug.merged.beforeDedupe = schedules.length;
       const map = new Map();
       for (const s of schedules) map.set(uniqueKey(s), s);
       schedules = Array.from(map.values());
+      brityDebug.merged.afterDedupe = schedules.length;
     } else {
       console.log('📋 1단계: RPA 등록 스케줄 조회 (/schedulings/list)');
-      schedules = await brityRpaService.getSchedules(startDate, endDate);
+      const schedRes = await brityRpaService.getSchedulesWithMeta(startDate, endDate);
+      schedules = schedRes.items;
+      brityDebug.schedulings = schedRes.meta;
+      brityDebug.merged.beforeDedupe = schedules.length;
+      brityDebug.merged.afterDedupe = schedules.length;
     }
     console.log(`✅ ${schedules.length}개 스케줄 조회 완료\n`);
     currentSync.progress.total = schedules.length;
@@ -398,6 +416,7 @@ router.post('/rpa-schedules', async (req, res) => {
       recordsSkipped: skippedCount,
       recordsFailed: errorCount,
       totalRecords: schedules.length,
+      brity: brityDebug,
       powerAutomateEnabled,
       powerAutomateAvailable,
       powerAutomateQueryErrors,

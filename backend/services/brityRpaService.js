@@ -3,6 +3,19 @@ require('dotenv').config();
 
 class BrityRpaService {
   /**
+   * 내부 헬퍼: Brity API 호출
+   */
+  static async _post(endpoint, requestBody) {
+    return await axios.post(endpoint, requestBody, {
+      headers: {
+        Authorization: process.env.BRITY_RPA_TOKEN,
+        'Content-Type': 'application/json'
+      },
+      timeout: 30000
+    });
+  }
+
+  /**
    * Brity RPA API를 통해 Job 수행 결과(이력) 조회
    * API: POST /scheduler/api/v1/jobs/list
    *
@@ -10,6 +23,14 @@ class BrityRpaService {
    * @param {string} endIso   UTC ISO 8601
    */
   static async getJobResults(startIso, endIso, offset = 0, limit = 100) {
+    const res = await this.getJobResultsWithMeta(startIso, endIso, offset, limit);
+    return res.items;
+  }
+
+  /**
+   * getJobResults + 메타(totalCount/listCount/endpoint) 포함
+   */
+  static async getJobResultsWithMeta(startIso, endIso, offset = 0, limit = 100) {
     try {
       let apiUrl = process.env.BRITY_RPA_URL;
       if (!apiUrl) {
@@ -34,13 +55,7 @@ class BrityRpaService {
         }
       };
 
-      const response = await axios.post(endpoint, requestBody, {
-        headers: {
-          Authorization: process.env.BRITY_RPA_TOKEN,
-          'Content-Type': 'application/json'
-        },
-        timeout: 30000
-      });
+      const response = await this._post(endpoint, requestBody);
 
       const list = response.data.list || [];
       const totalCount = response.data.totalCount || list.length || 0;
@@ -52,7 +67,7 @@ class BrityRpaService {
       if (totalCount > all.length) {
         const maxLimit = 100;
         if (limit < maxLimit && totalCount > limit) {
-          return await this.getJobResults(startIso, endIso, 0, maxLimit);
+          return await this.getJobResultsWithMeta(startIso, endIso, 0, maxLimit);
         }
 
         while (all.length < totalCount) {
@@ -65,13 +80,7 @@ class BrityRpaService {
               endDatetime: endIso
             }
           };
-          const nextRes = await axios.post(endpoint, nextBody, {
-            headers: {
-              Authorization: process.env.BRITY_RPA_TOKEN,
-              'Content-Type': 'application/json'
-            },
-            timeout: 30000
-          });
+          const nextRes = await this._post(endpoint, nextBody);
 
           const nextList = nextRes.data.list || [];
           const nextListCount = nextRes.data.listCount || nextList.length;
@@ -82,7 +91,7 @@ class BrityRpaService {
       }
 
       // 정규화
-      return all
+      const items = all
         .filter(j => j.startTime)
         .map(j => {
           const start = j.startTime;
@@ -110,6 +119,17 @@ class BrityRpaService {
             sourceSystem: 'BRITY_RPA'
           };
         });
+
+      return {
+        items,
+        meta: {
+          endpoint,
+          request: requestBody,
+          totalCount,
+          listCount,
+          fetchedCount: items.length
+        }
+      };
     } catch (error) {
       console.error('Brity RPA Job 결과 조회 실패:', error.message);
       if (error.response && error.response.status === 401) {
@@ -128,6 +148,14 @@ class BrityRpaService {
    * - 미래 1년치 스케줄을 동기화하려면 /schedulings/list 를 사용해야 합니다.
    */
   static async getSchedules(startDate, endDate, offset = 0, limit = 100) {
+    const res = await this.getSchedulesWithMeta(startDate, endDate, offset, limit);
+    return res.items;
+  }
+
+  /**
+   * getSchedules + 메타(totalCount/listCount/endpointUsed) 포함
+   */
+  static async getSchedulesWithMeta(startDate, endDate, offset = 0, limit = 100) {
     try {
       // API URL 구성
       let apiUrl = process.env.BRITY_RPA_URL;
@@ -173,13 +201,7 @@ class BrityRpaService {
       console.log(`📤 요청 본문:`, JSON.stringify(requestBody, null, 2));
       
       const fetchAll = async (endpointToUse) => {
-        const response = await axios.post(endpointToUse, requestBody, {
-          headers: {
-            'Authorization': process.env.BRITY_RPA_TOKEN,
-            'Content-Type': 'application/json'
-          },
-          timeout: 30000
-        });
+        const response = await this._post(endpointToUse, requestBody);
 
         const rawList = response.data.list || [];
         const totalCount = response.data.totalCount || rawList.length || 0;
@@ -197,7 +219,7 @@ class BrityRpaService {
             const newLimit = 100;
             console.log(`📥 limit 증가하여 재조회: limit=${limit} → ${newLimit}`);
             // limit만 올려 동일 endpoint로 다시 호출
-            return await this.getSchedules(startDate, endDate, 0, newLimit);
+            return await this.getSchedulesWithMeta(startDate, endDate, 0, newLimit);
           }
 
           const maxLimit = limit >= 100 ? 100 : limit;
@@ -212,13 +234,7 @@ class BrityRpaService {
               parameter: requestBody.parameter
             };
 
-            const nextResponse = await axios.post(endpointToUse, nextRequestBody, {
-              headers: {
-                'Authorization': process.env.BRITY_RPA_TOKEN,
-                'Content-Type': 'application/json'
-              },
-              timeout: 30000
-            });
+            const nextResponse = await this._post(endpointToUse, nextRequestBody);
 
             const nextList = nextResponse.data.list || [];
             const nextListCount = nextResponse.data.listCount || nextList.length;
@@ -237,12 +253,24 @@ class BrityRpaService {
           }
         }
 
-        return allSchedules;
+        return {
+          raw: allSchedules,
+          meta: {
+            endpoint: endpointToUse,
+            request: requestBody,
+            totalCount,
+            listCount,
+            fetchedRawCount: allSchedules.length
+          }
+        };
       };
 
       let allSchedules;
+      let meta;
       try {
-        allSchedules = await fetchAll(preferredEndpoint);
+        const fetched = await fetchAll(preferredEndpoint);
+        allSchedules = fetched.raw;
+        meta = fetched.meta;
       } catch (err) {
         const status = err?.response?.status;
         const errData = err?.response?.data;
@@ -252,12 +280,13 @@ class BrityRpaService {
 
         if (enableFallback && preferredEndpoint.endsWith('/schedulings/calendar/list') && invalidInput) {
           console.warn(`⚠️ calendar/list INVALID_INPUT → /schedulings/list 로 폴백합니다.`);
-          allSchedules = await fetchAll(fallbackEndpoint);
+          const fetched = await fetchAll(fallbackEndpoint);
+          allSchedules = fetched.raw;
+          meta = fetched.meta;
         } else {
           throw err;
         }
       }
-      
       console.log(`📊 전체 데이터 수집 완료: ${allSchedules.length}개`);
 
       // 등록 스케줄 데이터 정규화
@@ -358,8 +387,16 @@ class BrityRpaService {
           });
         }
       }
-      
-      return normalizedSchedules;
+
+      return {
+        items: normalizedSchedules,
+        meta: {
+          ...meta,
+          endpointPreferred: preferredEndpoint,
+          endpointFallback: fallbackEndpoint,
+          usedFallback: meta?.endpoint === fallbackEndpoint
+        }
+      };
     } catch (error) {
       console.error('Brity RPA 스케줄 조회 실패:', error.message);
       
