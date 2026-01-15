@@ -252,13 +252,18 @@ class BrityRpaService {
 
       // 등록 스케줄 데이터 정규화
       const normalizedSchedules = [];
+
+      // 조회 범위(UTC) - Brity 응답 시간이 Z(UTC) 기반인 경우가 많아 UTC로 비교
+      const rangeStart = new Date(`${startDate}T00:00:00Z`);
+      const rangeEnd = new Date(`${endDate}T23:59:59Z`);
+      const inRange = (d) => d >= rangeStart && d <= rangeEnd;
       
       for (const s of allSchedules) {
         // 삭제/비활성 스케줄 제외
         if (s.delYn === 'Y' || s.inActiveYn === 'Y') continue;
 
-        const startTime = s.nextJobTime || s.startTime || s.scheduledTime;
-        if (!startTime) {
+        const baseStartTime = s.nextJobTime || s.startTime || s.scheduledTime;
+        if (!baseStartTime) {
           console.log(`⏭️ 스케줄 건너뜀 (startTime/nextJobTime 없음): ${s.id}`);
           continue;
         }
@@ -272,35 +277,75 @@ class BrityRpaService {
           continue;
         }
 
+        // 시간 반복 스케줄 처리
+        // - timeRepeatYn === 'Y' 인 경우, nextJobTime(또는 startTime)부터 interval로 timeRepeatPeriod만큼 생성
+        // - 단, 폭발 방지를 위해 생성 개수는 최대 200건으로 제한
+        const repeatYn = String(s.timeRepeatYn || 'N').toUpperCase();
+        const repeatPeriodRaw = parseInt(s.timeRepeatPeriod, 10);
+        const repeatPeriod = Number.isFinite(repeatPeriodRaw) && repeatPeriodRaw > 1 ? repeatPeriodRaw : 1;
+
+        const repeatIntervalRaw = parseInt(s.timeRepeatInterval, 10);
+        // Brity 데이터에서 interval 값이 600(=10분)처럼 큰 값이 들어오는 케이스가 있어,
+        // 60 이상이면 "초"로 보고 분으로 변환(/60), 아니면 "분"으로 간주합니다.
+        const repeatIntervalMinutes = Number.isFinite(repeatIntervalRaw)
+          ? (repeatIntervalRaw >= 60 ? Math.max(1, Math.floor(repeatIntervalRaw / 60)) : Math.max(1, repeatIntervalRaw))
+          : null;
+
+        const schUntil = s.schUntil ? new Date(s.schUntil) : null;
+        const maxItems = 200;
+
+        // 후보 실행 시작 시각 목록 생성
+        const occurrenceStarts = [];
+        if (repeatYn === 'Y' && repeatIntervalMinutes) {
+          const base = new Date(baseStartTime);
+          const count = Math.min(repeatPeriod, maxItems);
+          for (let i = 0; i < count; i++) {
+            const d = new Date(base.getTime());
+            d.setMinutes(d.getMinutes() + i * repeatIntervalMinutes);
+            if (schUntil && d > schUntil) break;
+            if (inRange(d)) occurrenceStarts.push(d.toISOString());
+          }
+        } else {
+          const d = new Date(baseStartTime);
+          if (!schUntil || d <= schUntil) {
+            if (inRange(d)) occurrenceStarts.push(d.toISOString());
+          }
+        }
+
         // 종료 시간은 등록 스케줄 API에 명확히 없을 수 있어 기본 1시간으로 잡음
-        const endTime = (() => {
-          const start = new Date(startTime);
+        const computeEnd = (startIso) => {
+          const start = new Date(startIso);
           start.setMinutes(start.getMinutes() + 60);
           return start.toISOString();
-        })();
+        };
 
         // 제목은 jobScheduleName/processName 우선
         const subject = s.jobScheduleName || s.scheduleName || s.processName || s.id || '제목 없음';
 
-        normalizedSchedules.push({
-          id: s.id,
-          botId: botId,
-          botName: botName,
-          processId: s.processId,
-          processName: s.processName,
-          subject: subject,
-          start: startTime,
-          end: endTime,
-          body: s.description || s.processName || '',
-          sourceSystem: 'BRITY_RPA',
-          // 추가 필드(디버깅/표시용)
-          nextJobTime: s.nextJobTime,
-          startTime: s.startTime,
-          schUntil: s.schUntil,
-          timeRepeatYn: s.timeRepeatYn,
-          timeRepeatInterval: s.timeRepeatInterval,
-          regTime: s.regTimeselectScheduleJobListForDisplay
-        });
+        for (let idx = 0; idx < occurrenceStarts.length; idx++) {
+          const startIso = occurrenceStarts[idx];
+          normalizedSchedules.push({
+            // 반복 스케줄이면 id에 suffix를 붙여 유니크하게 (DB upsert는 start/end로 중복 방지)
+            id: occurrenceStarts.length > 1 ? `${s.id}_${idx}` : s.id,
+            botId: botId,
+            botName: botName,
+            processId: s.processId,
+            processName: s.processName,
+            subject: subject,
+            start: startIso,
+            end: computeEnd(startIso),
+            body: s.description || s.processName || '',
+            sourceSystem: 'BRITY_RPA',
+            // 추가 필드(디버깅/표시용)
+            nextJobTime: s.nextJobTime,
+            startTime: s.startTime,
+            schUntil: s.schUntil,
+            timeRepeatYn: s.timeRepeatYn,
+            timeRepeatInterval: s.timeRepeatInterval,
+            timeRepeatPeriod: s.timeRepeatPeriod,
+            regTime: s.regTimeselectScheduleJobListForDisplay
+          });
+        }
       }
       
       return normalizedSchedules;
