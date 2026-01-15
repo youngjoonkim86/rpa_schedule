@@ -91,10 +91,12 @@ class BrityRpaService {
       }
 
       // 정규화
+      // - /jobs/list 에서 "미래 일정"은 startTime이 비어 있고 scheduledTime만 내려오는 케이스가 있음
+      // - 따라서 startTime 우선, 없으면 scheduledTime을 start로 사용
       const items = all
-        .filter(j => j.startTime)
+        .filter(j => j.startTime || j.scheduledTime)
         .map(j => {
-          const start = j.startTime;
+          const start = j.startTime || j.scheduledTime;
           const end = j.endTime || (() => {
             const d = new Date(start);
             d.setMinutes(d.getMinutes() + 1);
