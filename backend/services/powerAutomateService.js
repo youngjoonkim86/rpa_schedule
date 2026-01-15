@@ -29,8 +29,12 @@ class PowerAutomateService {
         data: response.data
       };
     } catch (error) {
-      console.error('Power Automate 일정 등록 실패:', error.message);
-      throw new Error(`Power Automate API 오류: ${error.message}`);
+      const status = error?.response?.status;
+      console.error('Power Automate 일정 등록 실패:', status ? `${status} ${error.message}` : error.message);
+      const err = new Error(`Power Automate API 오류${status ? ` (${status})` : ''}: ${error.message}`);
+      err.status = status;
+      err.code = error?.code;
+      throw err;
     }
   }
 
@@ -72,8 +76,12 @@ class PowerAutomateService {
         events: events
       };
     } catch (error) {
-      console.error('Power Automate 일정 조회 실패:', error.message);
-      throw new Error(`Power Automate API 오류: ${error.message}`);
+      const status = error?.response?.status;
+      console.error('Power Automate 일정 조회 실패:', status ? `${status} ${error.message}` : error.message);
+      const err = new Error(`Power Automate API 오류${status ? ` (${status})` : ''}: ${error.message}`);
+      err.status = status;
+      err.code = error?.code;
+      throw err;
     }
   }
 }

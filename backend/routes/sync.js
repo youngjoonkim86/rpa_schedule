@@ -221,7 +221,7 @@ router.post('/rpa-schedules', async (req, res) => {
             }
           } catch (queryError) {
             powerAutomateQueryErrors += 1;
-            const status = queryError?.response?.status;
+            const status = queryError?.status || queryError?.response?.status;
             console.warn(`⚠️ Power Automate 일정 조회 실패 (${schedule.botName}):`, queryError.message);
             // 조회 실패 시 등록하면 중복이 생길 수 있어 안전하게 등록 생략
             existsInPowerAutomate = true;

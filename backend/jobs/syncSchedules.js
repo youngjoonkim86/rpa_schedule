@@ -137,7 +137,7 @@ if (brityRpaService && Schedule && db) {
           } catch (queryError) {
             // 조회 실패 시 등록하면 중복이 발생할 수 있으므로 안전하게 등록 생략
             existsInPowerAutomate = true;
-            const status = queryError?.response?.status;
+            const status = queryError?.status || queryError?.response?.status;
             if (status === 502 || status === 503 || status === 504 || queryError.code === 'ETIMEDOUT') {
               powerAutomateAvailable = false;
               console.warn(`🛑 Power Automate 임시 중단(자동 동기화): query failed (${status || queryError.code || 'unknown'})`);
