@@ -331,102 +331,201 @@ class BrityRpaService {
       }
       console.log(`📊 전체 데이터 수집 완료: ${allSchedules.length}개`);
 
-      // 등록 스케줄 데이터 정규화
+      // 등록 스케줄 데이터 정규화 (✅ 반복 규칙을 범위 내 "개별 일정"으로 전개)
       const normalizedSchedules = [];
 
-      // 조회 범위(UTC) - Brity 응답 시간이 Z(UTC) 기반인 경우가 많아 UTC로 비교
-      const rangeStart = new Date(`${startDate}T00:00:00Z`);
-      const rangeEnd = new Date(`${endDate}T23:59:59Z`);
-      const inRange = (d) => d >= rangeStart && d <= rangeEnd;
-      
+      const tz = 'Asia/Seoul';
+      const rangeStart = moment.tz(startDate, 'YYYY-MM-DD', tz).startOf('day');
+      const rangeEnd = moment.tz(endDate, 'YYYY-MM-DD', tz).endOf('day');
+
+      // 폭발 방지(스케줄 1건당 최대 생성)
+      const maxPerSchedule = 5000;
+
+      const parseHashTokens = (v) =>
+        String(v || '')
+          .split('#')
+          .map(x => x.trim())
+          .filter(Boolean);
+
+      const parseHashNums = (v) =>
+        parseHashTokens(v)
+          .map(x => parseInt(x, 10))
+          .filter(n => Number.isFinite(n));
+
+      const computeEnd = (startIso) => moment(startIso).add(60, 'minute').toISOString();
+
       for (const s of allSchedules) {
-        // 삭제/비활성 스케줄 제외
         if (s.delYn === 'Y' || s.inActiveYn === 'Y') continue;
 
-        const baseStartTime = s.nextJobTime || s.startTime || s.scheduledTime;
-        if (!baseStartTime) {
-          console.log(`⏭️ 스케줄 건너뜀 (startTime/nextJobTime 없음): ${s.id}`);
-          continue;
-        }
-        
-        // botId 또는 botName이 없는 경우 제외
         const botId = s.botId || '';
         const botName = s.botName || s.botId || '';
-        
-        if (!botId && !botName) {
-          console.log(`⏭️ 스케줄 건너뜀 (botId/botName 없음): ${s.id}`);
-          continue;
-        }
+        if (!botId && !botName) continue;
 
-        // 시간 반복 스케줄 처리
-        // - timeRepeatYn === 'Y' 인 경우, nextJobTime(또는 startTime)부터 interval로 timeRepeatPeriod만큼 생성
-        // - 단, 폭발 방지를 위해 생성 개수는 최대 200건으로 제한
+        const subject = s.jobScheduleName || s.scheduleName || s.processName || s.id || '제목 없음';
+
+        const baseStartRaw = s.startTime || s.schDetStartDt || s.nextJobTime || s.scheduledTime;
+        if (!baseStartRaw) continue;
+
+        const baseStart = moment.tz(baseStartRaw, tz);
+        if (!baseStart.isValid()) continue;
+
+        // 종료 경계: schUntil / schDetEndDt 중 더 이른 값을 사용
+        const untilCandidates = [s.schUntil, s.schDetEndDt]
+          .filter(Boolean)
+          .map(x => moment.tz(x, tz))
+          .filter(m => m.isValid());
+        const ruleUntil = untilCandidates.length > 0 ? moment.min(untilCandidates) : null;
+
+        // 유효 범위(요청 범위와 교집합)
+        const effectiveStart = moment.max(rangeStart, baseStart);
+        const effectiveEnd = ruleUntil ? moment.min(rangeEnd, ruleUntil) : rangeEnd;
+        if (effectiveEnd.isBefore(effectiveStart)) continue;
+
+        const freq = String(s.freq || '').toUpperCase(); // DAILY/WEEKLY/MONTHLY
+        const freqIntervalRaw = parseInt(s.freqInterval, 10);
+        const freqInterval = Number.isFinite(freqIntervalRaw) && freqIntervalRaw > 0 ? freqIntervalRaw : 1;
+        const conditionTokens = parseHashTokens(s.schCondition);
+
+        // timeRepeat(하루 내 반복)
         const repeatYn = String(s.timeRepeatYn || 'N').toUpperCase();
         const repeatPeriodRaw = parseInt(s.timeRepeatPeriod, 10);
         const repeatPeriod = Number.isFinite(repeatPeriodRaw) && repeatPeriodRaw > 1 ? repeatPeriodRaw : 1;
-
         const repeatIntervalRaw = parseInt(s.timeRepeatInterval, 10);
-        // Brity 값 그대로(초/분) 처리:
-        // - 일반적으로 60 이상이면 "초" 단위로 내려오는 케이스(예: 600=10분)
-        // - 60 미만이면 "분" 단위로 내려오는 케이스(예: 3=3분)
-        // 위 기준으로 초로 환산한 뒤 그대로 적용합니다.
         const repeatIntervalSeconds = Number.isFinite(repeatIntervalRaw)
           ? (repeatIntervalRaw >= 60 ? Math.max(1, repeatIntervalRaw) : Math.max(1, repeatIntervalRaw) * 60)
           : null;
 
-        const schUntil = s.schUntil ? new Date(s.schUntil) : null;
-        const maxItems = 200;
+        const baseTime = { h: baseStart.hour(), m: baseStart.minute(), s: baseStart.second() };
 
-        // 후보 실행 시작 시각 목록 생성
-        const occurrenceStarts = [];
-        if (repeatYn === 'Y' && repeatIntervalSeconds) {
-          const base = new Date(baseStartTime);
-          const count = Math.min(repeatPeriod, maxItems);
-          for (let i = 0; i < count; i++) {
-            const d = new Date(base.getTime() + i * repeatIntervalSeconds * 1000);
-            if (schUntil && d > schUntil) break;
-            if (inRange(d)) occurrenceStarts.push(d.toISOString());
-          }
-        } else {
-          const d = new Date(baseStartTime);
-          if (!schUntil || d <= schUntil) {
-            if (inRange(d)) occurrenceStarts.push(d.toISOString());
-          }
-        }
-
-        // 종료 시간은 등록 스케줄 API에 명확히 없을 수 있어 기본 1시간으로 잡음
-        const computeEnd = (startIso) => {
-          const start = new Date(startIso);
-          start.setMinutes(start.getMinutes() + 60);
-          return start.toISOString();
+        const dayLevelStarts = [];
+        const addDayLevel = (m) => {
+          if (m.isBefore(effectiveStart) || m.isAfter(effectiveEnd)) return;
+          dayLevelStarts.push(m);
         };
 
-        // 제목은 jobScheduleName/processName 우선
-        const subject = s.jobScheduleName || s.scheduleName || s.processName || s.id || '제목 없음';
+        if (freq === 'DAILY') {
+          let cur = effectiveStart.clone().hour(baseTime.h).minute(baseTime.m).second(baseTime.s).millisecond(0);
+          if (cur.isBefore(effectiveStart)) cur.add(1, 'day');
+          if (cur.isBefore(baseStart)) cur = baseStart.clone();
+          while (!cur.isAfter(effectiveEnd) && dayLevelStarts.length < maxPerSchedule) {
+            addDayLevel(cur.clone());
+            cur.add(freqInterval, 'day');
+          }
+        } else if (freq === 'WEEKLY') {
+          // schCondition 예: "#2#4#6" (가정: 1=일,2=월,...7=토)
+          const days = parseHashNums(s.schCondition);
+          const wanted = new Set(days.length > 0 ? days : [baseStart.day() === 0 ? 1 : baseStart.day() + 1]);
+          const baseWeekStart = baseStart.clone().startOf('week'); // 일요일 기준
+          let cur = effectiveStart.clone().startOf('day');
+          while (!cur.isAfter(effectiveEnd) && dayLevelStarts.length < maxPerSchedule) {
+            const dow = cur.day() === 0 ? 1 : cur.day() + 1;
+            if (wanted.has(dow)) {
+              const weekDiff = Math.floor(cur.clone().startOf('week').diff(baseWeekStart, 'weeks', true));
+              if (weekDiff % freqInterval === 0) {
+                addDayLevel(cur.clone().hour(baseTime.h).minute(baseTime.m).second(baseTime.s).millisecond(0));
+              }
+            }
+            cur.add(1, 'day');
+          }
+        } else if (freq === 'MONTHLY') {
+          // schCondition 예: "#D" / "#L" / "#15"
+          const hasL = conditionTokens.includes('L');
+          const hasD = conditionTokens.includes('D');
+          const nums = conditionTokens.map(t => parseInt(t, 10)).filter(n => Number.isFinite(n));
+          let dayOfMonth = baseStart.date();
+          if (nums.length > 0) dayOfMonth = nums[0];
+          if (hasD) dayOfMonth = baseStart.date();
 
-        for (let idx = 0; idx < occurrenceStarts.length; idx++) {
-          const startIso = occurrenceStarts[idx];
-          normalizedSchedules.push({
-            // 반복 스케줄이면 id에 suffix를 붙여 유니크하게 (DB upsert는 start/end로 중복 방지)
-            id: occurrenceStarts.length > 1 ? `${s.id}_${idx}` : s.id,
-            botId: botId,
-            botName: botName,
-            processId: s.processId,
-            processName: s.processName,
-            subject: subject,
-            start: startIso,
-            end: computeEnd(startIso),
-            body: s.description || s.processName || '',
-            sourceSystem: 'BRITY_RPA',
-            // 추가 필드(디버깅/표시용)
-            nextJobTime: s.nextJobTime,
-            startTime: s.startTime,
-            schUntil: s.schUntil,
-            timeRepeatYn: s.timeRepeatYn,
-            timeRepeatInterval: s.timeRepeatInterval,
-            timeRepeatPeriod: s.timeRepeatPeriod,
-            regTime: s.regTimeselectScheduleJobListForDisplay
-          });
+          const baseMonth = baseStart.clone().startOf('month');
+          let monthCursor = effectiveStart.clone().startOf('month');
+          // base 기준으로 freqInterval 배수 달만 선택
+          while ((monthCursor.diff(baseMonth, 'months') % freqInterval) !== 0) {
+            monthCursor.add(1, 'month');
+          }
+
+          while (!monthCursor.isAfter(effectiveEnd) && dayLevelStarts.length < maxPerSchedule) {
+            const endOfMonth = monthCursor.clone().endOf('month').date();
+            const dom = hasL ? endOfMonth : Math.min(dayOfMonth, endOfMonth);
+            const occ = monthCursor
+              .clone()
+              .date(dom)
+              .hour(baseTime.h)
+              .minute(baseTime.m)
+              .second(baseTime.s)
+              .millisecond(0);
+            addDayLevel(occ);
+            monthCursor.add(freqInterval, 'month');
+          }
+        } else {
+          // freq가 없거나 알 수 없는 경우: 1회만 (start/nextJob 기준)
+          addDayLevel(baseStart.clone());
+        }
+
+        // timeRepeat 확장 + push
+        let emitted = 0;
+        let suffix = 0;
+        for (const dl of dayLevelStarts) {
+          if (repeatYn === 'Y' && repeatIntervalSeconds) {
+            const count = Math.min(repeatPeriod, 2000);
+            for (let i = 0; i < count; i++) {
+              const occ = dl.clone().add(i * repeatIntervalSeconds, 'seconds');
+              if (ruleUntil && occ.isAfter(ruleUntil)) break;
+              if (occ.isBefore(effectiveStart) || occ.isAfter(effectiveEnd)) continue;
+              const startIso = occ.toISOString();
+              normalizedSchedules.push({
+                id: `${s.id}_${suffix++}`,
+                botId,
+                botName,
+                processId: s.processId,
+                processName: s.processName,
+                subject,
+                start: startIso,
+                end: computeEnd(startIso),
+                body: s.description || s.processName || '',
+                sourceSystem: 'BRITY_RPA',
+                nextJobTime: s.nextJobTime,
+                startTime: s.startTime,
+                schUntil: s.schUntil,
+                schDetEndDt: s.schDetEndDt,
+                freq: s.freq,
+                freqInterval: s.freqInterval,
+                schCondition: s.schCondition,
+                timeRepeatYn: s.timeRepeatYn,
+                timeRepeatInterval: s.timeRepeatInterval,
+                timeRepeatPeriod: s.timeRepeatPeriod,
+                regTime: s.regTimeselectScheduleJobListForDisplay
+              });
+              emitted++;
+              if (emitted >= maxPerSchedule) break;
+            }
+          } else {
+            const startIso = dl.toISOString();
+            normalizedSchedules.push({
+              id: `${s.id}_${suffix++}`,
+              botId,
+              botName,
+              processId: s.processId,
+              processName: s.processName,
+              subject,
+              start: startIso,
+              end: computeEnd(startIso),
+              body: s.description || s.processName || '',
+              sourceSystem: 'BRITY_RPA',
+              nextJobTime: s.nextJobTime,
+              startTime: s.startTime,
+              schUntil: s.schUntil,
+              schDetEndDt: s.schDetEndDt,
+              freq: s.freq,
+              freqInterval: s.freqInterval,
+              schCondition: s.schCondition,
+              timeRepeatYn: s.timeRepeatYn,
+              timeRepeatInterval: s.timeRepeatInterval,
+              timeRepeatPeriod: s.timeRepeatPeriod,
+              regTime: s.regTimeselectScheduleJobListForDisplay
+            });
+            emitted++;
+          }
+          if (emitted >= maxPerSchedule) break;
         }
       }
 

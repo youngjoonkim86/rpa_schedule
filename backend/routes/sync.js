@@ -199,25 +199,28 @@ router.post('/rpa-schedules', async (req, res) => {
       }
     };
     if (effectiveBritySource === 'jobs') {
-      // ✅ 실제 운영 환경에서 /jobs/list가 "오늘 이후"도 내려오는 케이스가 있어
-      // start~end 전체 범위를 그대로 /jobs/list로 조회해야 합니다.
-      console.log('📋 1단계: Brity 스케줄/이력 조회 (/jobs/list, 전체 범위)');
-      const startIso = moment.tz(startDate, 'YYYY-MM-DD', tz).startOf('day').toISOString();
-      const endIso = moment.tz(endDate, 'YYYY-MM-DD', tz).endOf('day').toISOString();
-      const jobRes = await brityRpaService.getJobResultsWithMeta(startIso, endIso);
-      schedules = jobRes.items;
-      brityDebug.jobs = jobRes.meta;
+      // ✅ jobs/list는 "실행 결과(이력)" 위주이므로 과거/오늘 구간에 적합
+      // ✅ schedulings/*는 "등록 스케줄(반복 규칙)"이므로 오늘/미래 구간에 적합
+      console.log('📋 1단계: Brity 조회 (과거/오늘=jobs, 오늘/미래=schedulings)');
 
-      // 필요 시(환경별) 등록 스케줄 API도 병합할 수 있게 옵션 제공
-      // - default: false (jobs/list만 사용)
-      // - enable: BRITY_SYNC_MERGE_SCHEDULINGS=true
-      // ✅ 미래 일정은 schedulings(등록 스케줄)에서 내려오는 케이스가 많아 자동 병합
+      // 1) jobs/list: startDate ~ min(endDate, today)
+      if (startDate <= todayStr) {
+        const jobsEndStr = endDate < todayStr ? endDate : todayStr;
+        const startIso = moment.tz(startDate, 'YYYY-MM-DD', tz).startOf('day').toISOString();
+        const endIso = moment.tz(jobsEndStr, 'YYYY-MM-DD', tz).endOf('day').toISOString();
+        const jobRes = await brityRpaService.getJobResultsWithMeta(startIso, endIso);
+        schedules = [...schedules, ...jobRes.items];
+        brityDebug.jobs = jobRes.meta;
+      }
+
+      // 2) schedulings/*: max(startDate, today) ~ endDate (미래 포함)
       const mergeSchedulings =
-        String(process.env.BRITY_SYNC_MERGE_SCHEDULINGS || 'false').toLowerCase() === 'true' ||
-        endDate > todayStr;
-      if (mergeSchedulings) {
-        console.log('➕ /schedulings/* 병합(미래 일정 포함)');
-        const schedRes = await brityRpaService.getSchedulesWithMeta(startDate, endDate);
+        String(process.env.BRITY_SYNC_MERGE_SCHEDULINGS || 'true').toLowerCase() === 'true' ||
+        endDate >= todayStr;
+      if (mergeSchedulings && endDate >= todayStr) {
+        const schedStartStr = startDate > todayStr ? startDate : todayStr;
+        console.log(`➕ /schedulings/* 병합(반복 규칙 전개): ${schedStartStr} ~ ${endDate}`);
+        const schedRes = await brityRpaService.getSchedulesWithMeta(schedStartStr, endDate);
         brityDebug.schedulings = schedRes.meta;
         schedules = [...schedules, ...schedRes.items];
       }
