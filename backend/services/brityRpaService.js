@@ -1,5 +1,6 @@
 const axios = require('axios');
 require('dotenv').config();
+const moment = require('moment-timezone');
 
 class BrityRpaService {
   /**
@@ -45,55 +46,92 @@ class BrityRpaService {
         throw new Error('BRITY_RPA_TOKEN이 설정되어 있지 않습니다. backend/.env에 BRITY_RPA_TOKEN을 설정해주세요.');
       }
 
-      const requestBody = {
-        offset,
-        limit,
-        orderBy: 'startTime desc',
-        parameter: {
-          startDatetime: startIso,
-          endDatetime: endIso
-        }
-      };
-
-      const response = await this._post(endpoint, requestBody);
-
-      const list = response.data.list || [];
-      const totalCount = response.data.totalCount || list.length || 0;
-      const listCount = response.data.listCount || list.length || 0;
-
-      let all = [...list];
-      let currentOffset = offset + listCount;
-
-      if (totalCount > all.length) {
-        const maxLimit = 100;
-        if (limit < maxLimit && totalCount > limit) {
-          return await this.getJobResultsWithMeta(startIso, endIso, 0, maxLimit);
-        }
-
-        while (all.length < totalCount) {
-          const nextBody = {
-            offset: currentOffset,
-            limit: maxLimit,
+      const buildRequest = (mode) => {
+        if (mode === 'calendar') {
+          // 일부 환경에서는 jobs/list도 START_DATETIME/END_DATETIME(YYYY-MM-DD HH:mm) 포맷을 요구/권장
+          const tz = 'Asia/Seoul';
+          return {
+            offset,
+            limit,
             orderBy: 'startTime desc',
             parameter: {
-              startDatetime: startIso,
-              endDatetime: endIso
+              START_DATETIME: moment.tz(startIso, tz).format('YYYY-MM-DD HH:mm'),
+              END_DATETIME: moment.tz(endIso, tz).format('YYYY-MM-DD HH:mm')
             }
           };
-          const nextRes = await this._post(endpoint, nextBody);
+        }
+        // default: ISO (기존 방식)
+        return {
+          offset,
+          limit,
+          orderBy: 'startTime desc',
+          parameter: {
+            startDatetime: startIso,
+            endDatetime: endIso
+          }
+        };
+      };
 
-          const nextList = nextRes.data.list || [];
-          const nextListCount = nextRes.data.listCount || nextList.length;
-          if (nextList.length === 0) break;
-          all.push(...nextList);
-          currentOffset += nextListCount;
+      const modeEnv = String(process.env.BRITY_JOBS_PARAM_MODE || 'auto').toLowerCase();
+      const shouldProbe = String(process.env.BRITY_JOBS_AUTO_PROBE || 'true').toLowerCase() === 'true';
+
+      const fetchAllByMode = async (mode) => {
+        const req = buildRequest(mode);
+        const first = await this._post(endpoint, req);
+        const firstList = first.data.list || [];
+        const totalCount = first.data.totalCount || firstList.length || 0;
+        const listCount = first.data.listCount || firstList.length || 0;
+
+        let all = [...firstList];
+        let currentOffset = offset + listCount;
+
+        if (totalCount > all.length) {
+          const maxLimit = 100;
+          while (all.length < totalCount) {
+            const nextBody = {
+              offset: currentOffset,
+              limit: maxLimit,
+              orderBy: 'startTime desc',
+              parameter: req.parameter
+            };
+            const nextRes = await this._post(endpoint, nextBody);
+            const nextList = nextRes.data.list || [];
+            const nextListCount = nextRes.data.listCount || nextList.length;
+            if (nextList.length === 0) break;
+            all.push(...nextList);
+            currentOffset += nextListCount;
+          }
+        }
+
+        return { mode, req, all, totalCount, listCount };
+      };
+
+      // 1) 1차(기본) 모드
+      const primaryMode = modeEnv === 'calendar' ? 'calendar' : 'iso';
+      let fetched = await fetchAllByMode(primaryMode);
+
+      // 2) auto 모드면 반대 모드도 "첫 페이지만" 찍어서 totalCount 비교 후 더 큰 쪽 선택
+      if (modeEnv === 'auto' && shouldProbe) {
+        const altMode = primaryMode === 'iso' ? 'calendar' : 'iso';
+        try {
+          const altReq = buildRequest(altMode);
+          const altRes = await this._post(endpoint, altReq);
+          const altList = altRes.data.list || [];
+          const altTotal = altRes.data.totalCount || altList.length || 0;
+
+          if (altTotal > (fetched.totalCount || 0)) {
+            console.warn(`🔎 Brity jobs/list 모드 자동 전환: ${primaryMode}(${fetched.totalCount}) → ${altMode}(${altTotal})`);
+            fetched = await fetchAllByMode(altMode);
+          }
+        } catch (e) {
+          // probing 실패는 무시하고 primary 결과 사용
         }
       }
 
       // 정규화
       // - /jobs/list 에서 "미래 일정"은 startTime이 비어 있고 scheduledTime만 내려오는 케이스가 있음
       // - 따라서 startTime 우선, 없으면 scheduledTime을 start로 사용
-      const items = all
+      const items = fetched.all
         .filter(j => j.startTime || j.scheduledTime)
         .map(j => {
           const start = j.startTime || j.scheduledTime;
@@ -126,10 +164,12 @@ class BrityRpaService {
         items,
         meta: {
           endpoint,
-          request: requestBody,
-          totalCount,
-          listCount,
-          fetchedCount: items.length
+          request: fetched.req,
+          totalCount: fetched.totalCount,
+          listCount: fetched.listCount,
+          fetchedCount: items.length,
+          mode: fetched.mode,
+          modeEnv
         }
       };
     } catch (error) {
