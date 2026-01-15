@@ -81,6 +81,35 @@ class Schedule {
   }
 
   /**
+   * Power Automate 중복 등록 방지를 위한 "정확 일치" 존재 체크
+   * - bot_id + subject + start_datetime + end_datetime 가 동일한 ACTIVE 일정이 이미 있으면 true
+   * - JS Date 파싱/타임존 이슈를 피하기 위해 DB에서 직접 비교합니다.
+   */
+  static async existsExactActive({ botId, subject, startIso, endIso }) {
+    if (!(await ensureConnection())) {
+      throw new Error('데이터베이스 연결이 없습니다.');
+    }
+
+    const mysqlStart = toMySQLDateTime(startIso);
+    const mysqlEnd = toMySQLDateTime(endIso);
+    if (!mysqlStart || !mysqlEnd) return false;
+
+    const [rows] = await db.execute(
+      `SELECT schedule_id
+       FROM bot_schedules
+       WHERE status = 'ACTIVE'
+         AND bot_id = ?
+         AND subject = ?
+         AND start_datetime = ?
+         AND end_datetime = ?
+       LIMIT 1`,
+      [botId, subject, mysqlStart, mysqlEnd]
+    );
+
+    return rows.length > 0;
+  }
+
+  /**
    * ID로 일정 조회
    */
   static async findById(id) {
