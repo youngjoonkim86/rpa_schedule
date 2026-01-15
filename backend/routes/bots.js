@@ -10,6 +10,7 @@ const BOT_COLORS = {
   'BOT4': '#F39C12',
   'BOT5': '#9B59B6',
   'ALL': '#95A5A6',
+  '일정등록': '#95A5A6',
   'BOT-T7C50': '#3498DB',
   'BOT-P2OXI': '#2ECC71',
   'BOT-X1G3Z': '#E74C3C',
@@ -28,7 +29,9 @@ router.get('/', async (req, res) => {
       { id: 'BOT2', name: 'BOT2', color: BOT_COLORS.BOT2 },
       { id: 'BOT3', name: 'BOT3', color: BOT_COLORS.BOT3 },
       { id: 'BOT4', name: 'BOT4', color: BOT_COLORS.BOT4 },
-      { id: 'BOT5', name: 'BOT5', color: BOT_COLORS.BOT5 }
+      { id: 'BOT5', name: 'BOT5', color: BOT_COLORS.BOT5 },
+      // 수동 등록 카테고리도 항상 보이게 (해당 일정이 0건이어도 필터에서 선택 가능)
+      { id: '일정등록', name: '일정등록', color: BOT_COLORS['일정등록'] }
     ];
 
     // DB에서 실제 사용 중인 BOT 목록 조회
