@@ -158,6 +158,11 @@ router.post('/rpa-schedules', async (req, res) => {
 
     const powerAutomateEnabled =
       !!process.env.POWER_AUTOMATE_QUERY_URL && !!process.env.POWER_AUTOMATE_CREATE_URL;
+    // PA가 502 등으로 불안정할 때 동기화가 "끝없이 느려지고 타임아웃" 나는 걸 방지
+    // - 첫 번째 치명적 실패를 감지하면 해당 run에서는 PA 조회/등록을 즉시 중단
+    let powerAutomateAvailable = powerAutomateEnabled;
+    let powerAutomateDisabledReason = null;
+    let powerAutomateQueryErrors = 0;
     
     // 2단계: 각 스케줄에 대해 BOT 일정 조회 및 등록
     for (const schedule of schedules) {
@@ -178,7 +183,7 @@ router.post('/rpa-schedules', async (req, res) => {
           console.log(`⏭️ DB 중복(저장 스킵): ${schedule.botName} - ${schedule.subject} (${schedule.start})`);
         }
 
-        if (powerAutomateEnabled) {
+        if (powerAutomateAvailable) {
           let existsInPowerAutomate = false;
           try {
             // 조회 범위를 넓혀서 중복 체크 (시작 시간 ±1시간)
@@ -215,9 +220,18 @@ router.post('/rpa-schedules', async (req, res) => {
               });
             }
           } catch (queryError) {
+            powerAutomateQueryErrors += 1;
+            const status = queryError?.response?.status;
             console.warn(`⚠️ Power Automate 일정 조회 실패 (${schedule.botName}):`, queryError.message);
             // 조회 실패 시 등록하면 중복이 생길 수 있어 안전하게 등록 생략
             existsInPowerAutomate = true;
+
+            // 502/timeout 등 반복될 가능성이 큰 장애면 해당 run에서는 PA를 끈다
+            if (!powerAutomateDisabledReason && (status === 502 || status === 503 || status === 504 || queryError.code === 'ETIMEDOUT')) {
+              powerAutomateAvailable = false;
+              powerAutomateDisabledReason = `Power Automate query failed (${status || queryError.code || 'unknown'})`;
+              console.warn(`🛑 Power Automate 임시 중단: ${powerAutomateDisabledReason}`);
+            }
           }
 
           if (!existsInPowerAutomate) {
@@ -237,11 +251,12 @@ router.post('/rpa-schedules', async (req, res) => {
               console.warn(`⚠️ Power Automate 일정 등록 실패 (${schedule.botName}):`, registerError.message);
             }
           }
-        } else {
+        } else if (!powerAutomateEnabled) {
           // 설정이 없으면 PA 조회/등록 자체를 수행하지 않음(명확히)
-          // - "안되는 것처럼 보임"을 방지하기 위해 로그로 남김
-          // - DB 저장은 정상 진행
           console.log('ℹ️ Power Automate 미사용: POWER_AUTOMATE_QUERY_URL/CREATE_URL 미설정');
+        } else if (powerAutomateDisabledReason) {
+          // 장애로 인해 run 중 임시 중단된 상태
+          // (로그 스팸 방지: 매 건마다 찍지 않음)
         }
         
         // 3단계: DB에 저장 또는 업데이트 (중복이면 저장 스킵)
@@ -292,17 +307,6 @@ router.post('/rpa-schedules', async (req, res) => {
       console.warn('캐시 무효화 실패(계속 진행):', cacheError.message);
     }
     
-    // 캐시 무효화
-    try {
-      const redis = require('../config/redis');
-      const keys = await redis.keys('schedules:*');
-      if (keys.length > 0) {
-        await redis.del(keys);
-      }
-    } catch (cacheError) {
-      console.warn('캐시 무효화 실패:', cacheError.message);
-    }
-    
     console.log(`\n✅ 동기화 완료:`);
     console.log(`   - 총 스케줄 (nextJobTime 있음): ${schedules.length}개`);
     console.log(`   - DB 저장/업데이트: ${syncCount}개 (중복은 자동으로 업데이트됨)`);
@@ -318,7 +322,10 @@ router.post('/rpa-schedules', async (req, res) => {
       recordsSkipped: skippedCount,
       recordsFailed: errorCount,
       totalRecords: schedules.length,
-      powerAutomateEnabled
+      powerAutomateEnabled,
+      powerAutomateAvailable,
+      powerAutomateQueryErrors,
+      powerAutomateDisabledReason
     });
   } catch (error) {
     console.error('동기화 오류:', error);

@@ -79,6 +79,9 @@ if (brityRpaService && Schedule && db) {
     let errorCount = 0;
     let registeredCount = 0;
     let skippedCount = 0;
+    const powerAutomateEnabled =
+      !!process.env.POWER_AUTOMATE_QUERY_URL && !!process.env.POWER_AUTOMATE_CREATE_URL;
+    let powerAutomateAvailable = AUTO_REGISTER_TO_POWER_AUTOMATE && powerAutomateService && powerAutomateEnabled;
     
     // 2단계: 각 스케줄 처리
     for (const schedule of schedules) {
@@ -94,7 +97,7 @@ if (brityRpaService && Schedule && db) {
         const skipDbUpsert = !!existsInDb;
 
         // Power Automate 자동 등록이 활성화된 경우에만 실행
-        if (AUTO_REGISTER_TO_POWER_AUTOMATE && powerAutomateService) {
+        if (powerAutomateAvailable) {
           // 2-1: Power Automate에서 BOT 일정 조회
           let existsInPowerAutomate = false;
           try {
@@ -134,6 +137,11 @@ if (brityRpaService && Schedule && db) {
           } catch (queryError) {
             // 조회 실패 시 등록하면 중복이 발생할 수 있으므로 안전하게 등록 생략
             existsInPowerAutomate = true;
+            const status = queryError?.response?.status;
+            if (status === 502 || status === 503 || status === 504 || queryError.code === 'ETIMEDOUT') {
+              powerAutomateAvailable = false;
+              console.warn(`🛑 Power Automate 임시 중단(자동 동기화): query failed (${status || queryError.code || 'unknown'})`);
+            }
           }
           
           // 2-2: Power Automate에 일정이 없으면 등록
