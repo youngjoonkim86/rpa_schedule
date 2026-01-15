@@ -1,0 +1,14 @@
+{
+  "watch": ["server.js", "routes", "models", "services", "config", "jobs", "utils", "controllers"],
+  "ext": "js,json",
+  "ignore": [
+    "node_modules/**",
+    "../cloudflared-*.log",
+    "../*.log",
+    "../NGROK_URLS.md",
+    "../*.md"
+  ],
+  "delay": "200"
+}
+
+
