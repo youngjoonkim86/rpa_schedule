@@ -1,8 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { Modal, Form, Input, Select, DatePicker, TimePicker, Button, message } from 'antd';
+import { Modal, Form, Input, DatePicker, TimePicker, Button, message } from 'antd';
 import dayjs, { Dayjs } from 'dayjs';
 import { scheduleApi, CreateScheduleData, UpdateScheduleData, Schedule } from '../services/api';
-import { Bot } from '../services/api';
 
 const { TextArea } = Input;
 
@@ -11,15 +10,13 @@ interface ScheduleModalProps {
   onCancel: () => void;
   onSuccess: () => void;
   schedule?: Schedule | null;
-  bots: Bot[];
 }
 
 const ScheduleModal: React.FC<ScheduleModalProps> = ({
   visible,
   onCancel,
   onSuccess,
-  schedule,
-  bots
+  schedule
 }) => {
   const [form] = Form.useForm();
   const isEdit = !!schedule;
@@ -29,7 +26,6 @@ const ScheduleModal: React.FC<ScheduleModalProps> = ({
       if (schedule) {
         // 수정 모드
         form.setFieldsValue({
-          bot: schedule.botId,
           subject: schedule.subject,
           startDate: dayjs(schedule.start),
           startTime: dayjs(schedule.start),
@@ -97,9 +93,10 @@ const ScheduleModal: React.FC<ScheduleModalProps> = ({
         await scheduleApi.updateSchedule(schedule.id, scheduleData);
         message.success('일정이 수정되었습니다.');
       } else {
+        const MANUAL_BOT = '일정등록';
         await scheduleApi.createSchedule({
           ...scheduleData,
-          bot: values.bot
+          bot: MANUAL_BOT
         } as CreateScheduleData);
         message.success('일정이 등록되었습니다.');
       }
@@ -139,28 +136,6 @@ const ScheduleModal: React.FC<ScheduleModalProps> = ({
         layout="vertical"
         requiredMark={false}
       >
-        {!isEdit && (
-          <Form.Item
-            name="bot"
-            label="BOT"
-            rules={[{ required: true, message: 'BOT을 선택해주세요.' }]}
-          >
-            <Select 
-              placeholder="BOT을 선택하세요"
-              showSearch
-              filterOption={(input, option) =>
-                (option?.children as string)?.toLowerCase().includes(input.toLowerCase())
-              }
-            >
-              {bots.map(bot => (
-                <Select.Option key={bot.id} value={bot.id}>
-                  {bot.name}
-                </Select.Option>
-              ))}
-            </Select>
-          </Form.Item>
-        )}
-
         <Form.Item
           name="subject"
           label="제목"

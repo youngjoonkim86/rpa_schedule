@@ -210,7 +210,6 @@ function App() {
           }}
           onSuccess={handleModalSuccess}
           schedule={selectedSchedule}
-          bots={bots}
         />
       </Layout>
     </ConfigProvider>
