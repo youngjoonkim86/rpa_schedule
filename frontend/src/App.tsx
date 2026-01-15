@@ -92,11 +92,17 @@ function App() {
       console.error('Failed to sync:', error);
       
       let errorMessage = '동기화에 실패했습니다.';
-      // 프론트 요청 타임아웃이어도 서버는 계속 동기화 중일 수 있으므로
+      // 프론트 요청 타임아웃/터널 524여도 서버는 계속 동기화 중일 수 있으므로
       // /sync/status 를 폴링해서 "서버 완료" 시점까지 로딩을 유지한다.
-      if (error.code === 'ECONNABORTED') {
+      const isCloudflare524 = error?.response?.status === 524;
+      if (error.code === 'ECONNABORTED' || isCloudflare524) {
         didTimeout = true;
-        message.warning('동기화 요청이 타임아웃되었습니다. 서버에서 계속 진행 중인지 상태를 확인합니다...', 5);
+        message.warning(
+          isCloudflare524
+            ? 'Cloudflare 터널에서 요청이 타임아웃(524)되었습니다. 서버에서 계속 진행 중인지 상태를 확인합니다...'
+            : '동기화 요청이 타임아웃되었습니다. 서버에서 계속 진행 중인지 상태를 확인합니다...',
+          5
+        );
 
         const maxWaitMs = 30 * 60 * 1000; // 30분
         const pollIntervalMs = 5000; // 5초

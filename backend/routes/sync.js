@@ -169,6 +169,22 @@ router.post('/rpa-schedules', async (req, res) => {
       paQueryErrors: 0,
       paDisabledReason: null,
     };
+
+    // ✅ Cloudflare Tunnel(524) 회피: 요청은 즉시 응답하고, 실제 동기화는 백그라운드에서 수행
+    res.status(202).json({
+      success: true,
+      message: '동기화를 시작했습니다. 진행 상태는 /api/sync/status 로 확인하세요.',
+      data: {
+        inProgress: true,
+        startedAt: currentSync.startedAt,
+        range: currentSync.range,
+        progress: currentSync.progress
+      }
+    });
+
+    // 백그라운드 실행(응답 이후)
+    (async () => {
+      try {
     
     // 1단계: Brity RPA API에서 스케줄 조회
     // britySource:
@@ -439,22 +455,10 @@ router.post('/rpa-schedules', async (req, res) => {
     console.log(`   - Power Automate 건너뜀 (이미 존재): ${skippedCount}개`);
     console.log(`   - 실패: ${errorCount}개`);
     
-    res.json({
-      success: true,
-      message: '동기화가 완료되었습니다.',
-      recordsSynced: syncCount,
-      recordsRegistered: registeredCount,
-      recordsSkipped: skippedCount,
-      recordsFailed: errorCount,
-      totalRecords: schedules.length,
-      brity: brityDebug,
-      powerAutomateEnabled,
-      powerAutomateAvailable,
-      powerAutomateQueryErrors,
-      powerAutomateDisabledReason
-    });
-  } catch (error) {
-    console.error('동기화 오류:', error);
+      // (이미 202 응답을 보냈으므로 여기서는 응답을 보내지 않음)
+      // 완료 정보는 sync_logs 및 /api/sync/status 에서 확인
+    } catch (error) {
+      console.error('동기화 오류:', error);
     
     // 에러 로그 기록
     try {
@@ -466,13 +470,25 @@ router.post('/rpa-schedules', async (req, res) => {
     } catch (logError) {
       console.error('에러 로그 기록 실패:', logError.message);
     }
-    
-    res.status(500).json({
-      success: false,
-      message: '동기화 중 오류가 발생했습니다.',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
-  } finally {
+    } finally {
+      // 진행 상태 종료
+      if (currentSync.inProgress) {
+        currentSync.inProgress = false;
+        currentSync.finishedAt = new Date().toISOString();
+      }
+    }
+  })().catch(() => {});
+
+  } catch (error) {
+    // 202 응답 이전 단계에서만 여기로 옴
+    console.error('동기화 시작 오류:', error);
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        message: '동기화 시작 중 오류가 발생했습니다.',
+        error: process.env.NODE_ENV === 'development' ? error.message : undefined
+      });
+    }
     // 진행 상태 종료
     if (currentSync.inProgress) {
       currentSync.inProgress = false;
