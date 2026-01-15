@@ -224,25 +224,38 @@ class BrityRpaService {
       console.log(`📡 Brity RPA 등록/캘린더 스케줄 API 호출: ${preferredEndpoint}`);
       console.log(`📅 기간: ${startDate} ~ ${endDate}`);
       
-      // schedulings/list 는 보통 "YYYY-MM-DD HH:mm" 형태를 기대 (명세/샘플 기준)
       const startDatetime = `${startDate} 00:00`;
       const endDatetime = `${endDate} 23:59`;
-      
-      // 요청 본문 구성
-      const requestBody = {
-        offset: offset,
-        limit: limit,
-        // 최신 등록/표시 기준 정렬(환경마다 다를 수 있어, 없으면 scheduledTime asc로 바꿔도 됨)
-        orderBy: 'regTimeselectScheduleJobListForDisplay desc',
-        parameter: {
-          START_DATETIME: startDatetime,
-          END_DATETIME: endDatetime
-        }
+
+      const buildRequestBody = (endpointToUse, overrideCalendarMode = null) => {
+        const isCalendar = String(endpointToUse).endsWith('/schedulings/calendar/list');
+
+        // ✅ calendar/list는 환경에 따라 parameter 키가 다름:
+        // - (사용자 제공 샘플) startDateTime/endDateTime
+        // - (기존 list용) START_DATETIME/END_DATETIME
+        // 기본은 calendar/list면 startDateTime/endDateTime으로 시도
+        const calendarMode = String(overrideCalendarMode || process.env.BRITY_CALENDAR_PARAM_MODE || 'auto').toLowerCase();
+        const useCalendarKeys = isCalendar && (calendarMode === 'auto' || calendarMode === 'calendar');
+
+        const parameter = useCalendarKeys
+          ? { startDateTime: startDatetime, endDateTime: endDatetime }
+          : { START_DATETIME: startDatetime, END_DATETIME: endDatetime };
+
+        // 정렬도 환경별로 다를 수 있어 calendar는 scheduledTime asc 기본
+        const orderBy = isCalendar ? 'scheduledTime asc' : 'regTimeselectScheduleJobListForDisplay desc';
+
+        return {
+          offset,
+          limit,
+          orderBy,
+          parameter
+        };
       };
-      
-      console.log(`📤 요청 본문:`, JSON.stringify(requestBody, null, 2));
-      
-      const fetchAll = async (endpointToUse) => {
+
+      const fetchAll = async (endpointToUse, overrideCalendarMode = null) => {
+        const requestBody = buildRequestBody(endpointToUse, overrideCalendarMode);
+        console.log(`📤 요청 본문:`, JSON.stringify(requestBody, null, 2));
+
         const response = await this._post(endpointToUse, requestBody);
 
         const rawList = response.data.list || [];
@@ -321,10 +334,26 @@ class BrityRpaService {
           (errData?.errorValue === 'INVALID_INPUT' || errData?.errorCode === 'SCHEDULER_I1');
 
         if (enableFallback && preferredEndpoint.endsWith('/schedulings/calendar/list') && invalidInput) {
-          console.warn(`⚠️ calendar/list INVALID_INPUT → /schedulings/list 로 폴백합니다.`);
-          const fetched = await fetchAll(fallbackEndpoint);
-          allSchedules = fetched.raw;
-          meta = fetched.meta;
+          // 1) calendar/list 파라미터 키가 달라서 INVALID_INPUT 나는 환경이 있어, 키를 바꿔 한 번 더 시도
+          const mode = String(process.env.BRITY_CALENDAR_PARAM_MODE || 'auto').toLowerCase();
+          if (mode === 'auto') {
+            try {
+              console.warn(`⚠️ calendar/list INVALID_INPUT → calendar 키 모드 전환(START_DATETIME/END_DATETIME) 재시도`);
+              const retry = await fetchAll(preferredEndpoint, 'list');
+              allSchedules = retry.raw;
+              meta = retry.meta;
+            } catch (e2) {
+              console.warn(`⚠️ calendar/list 재시도 실패 → /schedulings/list 로 폴백합니다.`);
+              const fetched = await fetchAll(fallbackEndpoint);
+              allSchedules = fetched.raw;
+              meta = fetched.meta;
+            }
+          } else {
+            console.warn(`⚠️ calendar/list INVALID_INPUT → /schedulings/list 로 폴백합니다.`);
+            const fetched = await fetchAll(fallbackEndpoint);
+            allSchedules = fetched.raw;
+            meta = fetched.meta;
+          }
         } else {
           throw err;
         }
