@@ -158,8 +158,10 @@ router.post('/rpa-schedules', async (req, res) => {
     // 2단계: 각 스케줄에 대해 BOT 일정 조회 및 등록
     for (const schedule of schedules) {
       try {
-        // 0단계(중요): DB에 이미 있는 스케줄이면 Power Automate 등록까지 포함해서 건너뜀
-        // - JS Date 파싱/타임존 이슈로 중복 판정이 흔들리지 않도록 "정확 일치"를 DB에서 확인
+        // 0단계(중요): DB에 이미 있는지 확인
+        // - 기존에는 "DB 중복이면 continue"로 PA 조회/등록까지 스킵되어,
+        //   "PA에 없으면 등록" 플로우가 누락되는 문제가 생김.
+        // - 이제는: DB 저장만 스킵하고, Power Automate는 계속 조회/등록 수행.
         const botIdForDb = schedule.botId || schedule.botName;
         const existsInDb = await Schedule.existsExactActive({
           botId: botIdForDb,
@@ -167,11 +169,9 @@ router.post('/rpa-schedules', async (req, res) => {
           startIso: schedule.start,
           endIso: schedule.end
         });
-
-        if (existsInDb) {
-          skippedCount++;
-          console.log(`⏭️ DB 중복 일정 건너뜀(=PA 등록도 생략): ${schedule.botName} - ${schedule.subject} (${schedule.start})`);
-          continue;
+        const skipDbUpsert = !!existsInDb;
+        if (skipDbUpsert) {
+          console.log(`⏭️ DB 중복(저장 스킵): ${schedule.botName} - ${schedule.subject} (${schedule.start})`);
         }
 
         // 2-1: Power Automate에서 BOT 일정 조회
@@ -252,20 +252,22 @@ router.post('/rpa-schedules', async (req, res) => {
           console.log(`⏭️ 일정 건너뜀 (이미 존재): ${schedule.botName} - ${schedule.subject}`);
         }
         
-        // 3단계: DB에 저장 또는 업데이트 (upsert가 중복을 체크/업데이트)
-        // botId가 비어있으면 botName을 사용
-        const scheduleId = await Schedule.upsert({
-          bot_id: schedule.botId || schedule.botName, // botId가 없으면 botName 사용
-          bot_name: schedule.botName,
-          subject: schedule.subject,
-          start_datetime: schedule.start,
-          end_datetime: schedule.end,
-          body: schedule.body,
-          process_id: schedule.processId,
-          source_system: 'BRITY_RPA'
-        });
-        
-        syncCount++;
+        // 3단계: DB에 저장 또는 업데이트 (중복이면 저장 스킵)
+        if (!skipDbUpsert) {
+          await Schedule.upsert({
+            bot_id: schedule.botId || schedule.botName, // botId가 없으면 botName 사용
+            bot_name: schedule.botName,
+            subject: schedule.subject,
+            start_datetime: schedule.start,
+            end_datetime: schedule.end,
+            body: schedule.body,
+            process_id: schedule.processId,
+            source_system: 'BRITY_RPA'
+          });
+          syncCount++;
+        } else {
+          skippedCount++;
+        }
       } catch (error) {
         console.error(`❌ 스케줄 처리 실패 (${schedule.id}):`, error.message);
         errorCount++;
