@@ -182,7 +182,7 @@ const Calendar: React.FC<CalendarProps> = ({ selectedBots, refreshTrigger }) => 
       />
 
       {/* 캘린더 하단: 금일 Brity 실패 내역(10분 단위) */}
-      <BrityFailuresPanel intervalMinutes={10} />
+      <BrityFailuresPanel intervalMinutes={10} selectedBots={selectedBots} />
     </div>
   );
 };

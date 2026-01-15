@@ -7,9 +7,10 @@ const { Text } = Typography;
 
 type Props = {
   intervalMinutes?: number; // default 10
+  selectedBots?: string[]; // 캘린더 BOT 필터와 동일 기준
 };
 
-const BrityFailuresPanel: React.FC<Props> = ({ intervalMinutes = 10 }) => {
+const BrityFailuresPanel: React.FC<Props> = ({ intervalMinutes = 10, selectedBots = [] }) => {
   const [loading, setLoading] = useState(false);
   const [buckets, setBuckets] = useState<BrityFailureBucket[]>([]);
   const [totalFailed, setTotalFailed] = useState<number>(0);
@@ -83,6 +84,26 @@ const BrityFailuresPanel: React.FC<Props> = ({ intervalMinutes = 10 }) => {
     },
   ];
 
+  // 캘린더 BOT 필터 적용 (botId/botName 둘 다 매칭)
+  const filteredBuckets = useMemo(() => {
+    if (!selectedBots || selectedBots.length === 0) return buckets;
+
+    return buckets
+      .map(b => {
+        const items = b.items.filter(it => {
+          const botId = it.botId || '';
+          const botName = it.botName || '';
+          return selectedBots.includes(botId) || selectedBots.includes(botName);
+        });
+        return { ...b, items, count: items.length };
+      })
+      .filter(b => b.count > 0);
+  }, [buckets, selectedBots]);
+
+  const filteredTotalFailed = useMemo(() => {
+    return filteredBuckets.reduce((sum, b) => sum + (b.count || 0), 0);
+  }, [filteredBuckets]);
+
   return (
     <Card
       style={{ marginTop: 16 }}
@@ -126,15 +147,20 @@ const BrityFailuresPanel: React.FC<Props> = ({ intervalMinutes = 10 }) => {
       }
     >
       <Spin spinning={loading}>
-        {totalFailed === 0 ? (
+        {filteredTotalFailed === 0 ? (
           <Empty description="금일 실패 내역이 없습니다." />
         ) : (
           <>
             <div style={{ marginBottom: 12 }}>
-              <Text strong>총 실패 건수: {totalFailed}건</Text>
+              <Text strong>총 실패 건수: {filteredTotalFailed}건</Text>
+              {selectedBots.length > 0 && (
+                <Text type="secondary" style={{ marginLeft: 8 }}>
+                  (BOT 필터 적용)
+                </Text>
+              )}
             </div>
             <Collapse
-              items={buckets.map(b => ({
+              items={filteredBuckets.map(b => ({
                 key: b.key,
                 label: `${b.key} ~ ${dayjs(b.end).format('HH:mm')} (${b.count}건)`,
                 children: (
