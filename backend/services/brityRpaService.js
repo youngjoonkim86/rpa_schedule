@@ -285,10 +285,12 @@ class BrityRpaService {
         const repeatPeriod = Number.isFinite(repeatPeriodRaw) && repeatPeriodRaw > 1 ? repeatPeriodRaw : 1;
 
         const repeatIntervalRaw = parseInt(s.timeRepeatInterval, 10);
-        // Brity 데이터에서 interval 값이 600(=10분)처럼 큰 값이 들어오는 케이스가 있어,
-        // 60 이상이면 "초"로 보고 분으로 변환(/60), 아니면 "분"으로 간주합니다.
-        const repeatIntervalMinutes = Number.isFinite(repeatIntervalRaw)
-          ? (repeatIntervalRaw >= 60 ? Math.max(1, Math.floor(repeatIntervalRaw / 60)) : Math.max(1, repeatIntervalRaw))
+        // Brity 값 그대로(초/분) 처리:
+        // - 일반적으로 60 이상이면 "초" 단위로 내려오는 케이스(예: 600=10분)
+        // - 60 미만이면 "분" 단위로 내려오는 케이스(예: 3=3분)
+        // 위 기준으로 초로 환산한 뒤 그대로 적용합니다.
+        const repeatIntervalSeconds = Number.isFinite(repeatIntervalRaw)
+          ? (repeatIntervalRaw >= 60 ? Math.max(1, repeatIntervalRaw) : Math.max(1, repeatIntervalRaw) * 60)
           : null;
 
         const schUntil = s.schUntil ? new Date(s.schUntil) : null;
@@ -296,12 +298,11 @@ class BrityRpaService {
 
         // 후보 실행 시작 시각 목록 생성
         const occurrenceStarts = [];
-        if (repeatYn === 'Y' && repeatIntervalMinutes) {
+        if (repeatYn === 'Y' && repeatIntervalSeconds) {
           const base = new Date(baseStartTime);
           const count = Math.min(repeatPeriod, maxItems);
           for (let i = 0; i < count; i++) {
-            const d = new Date(base.getTime());
-            d.setMinutes(d.getMinutes() + i * repeatIntervalMinutes);
+            const d = new Date(base.getTime() + i * repeatIntervalSeconds * 1000);
             if (schUntil && d > schUntil) break;
             if (inRange(d)) occurrenceStarts.push(d.toISOString());
           }

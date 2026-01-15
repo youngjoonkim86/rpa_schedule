@@ -5,7 +5,7 @@ import timeGridPlugin from '@fullcalendar/timegrid';
 import interactionPlugin from '@fullcalendar/interaction';
 import { EventInput } from '@fullcalendar/core';
 import { scheduleApi, Schedule } from '../services/api';
-import { Input, Select, Space, Typography, message } from 'antd';
+import { Button, Input, Modal, Select, Space, Typography, message } from 'antd';
 import dayjs from 'dayjs';
 import 'dayjs/locale/ko';
 import koLocale from '@fullcalendar/core/locales/ko';
@@ -25,6 +25,7 @@ const Calendar: React.FC<CalendarProps> = ({ selectedBots, refreshTrigger }) => 
   const [loading, setLoading] = useState(false);
   const calendarRef = useRef<FullCalendar>(null);
   const [lastRange, setLastRange] = useState<{ start: Date; end: Date } | null>(null);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
 
   // 과제(제목/프로세스) 필터
   const [taskQuery, setTaskQuery] = useState<string>('');
@@ -84,9 +85,6 @@ const Calendar: React.FC<CalendarProps> = ({ selectedBots, refreshTrigger }) => 
     const q = taskQuery.trim().toLowerCase();
 
     const filtered = schedules.filter((s: Schedule) => {
-      // "일정등록"은 필터 메뉴에서 제거하지만, 캘린더에서는 항상 보이게(내부 카테고리)
-      if (s.botId === '일정등록' || s.botName === '일정등록') return true;
-
       // 1) BOT 필터 (기존 캘린더 필터와 동일)
       const botOk =
         selectedBots.length === 0 ||
@@ -129,6 +127,43 @@ const Calendar: React.FC<CalendarProps> = ({ selectedBots, refreshTrigger }) => 
       };
     });
   }, [schedules, selectedBots, selectedTasks, taskQuery]);
+
+  const refreshCurrentRange = async () => {
+    if (lastRange) {
+      await fetchSchedules(lastRange.start, lastRange.end);
+      return;
+    }
+    if (calendarRef.current) {
+      const view = calendarRef.current.getApi().view;
+      if (view) await fetchSchedules(view.activeStart, view.activeEnd);
+    }
+  };
+
+  const confirmDelete = (scheduleId: number, sourceSystem?: string) => {
+    const isExternal = sourceSystem === 'BRITY_RPA' || sourceSystem === 'POWER_AUTOMATE';
+    Modal.confirm({
+      title: '일정 삭제',
+      content: isExternal
+        ? '이 일정은 외부 시스템(동기화)에서 다시 생성될 수 있습니다. 그래도 삭제할까요?'
+        : '이 일정을 삭제할까요?',
+      okText: '삭제',
+      okButtonProps: { danger: true },
+      cancelText: '취소',
+      onOk: async () => {
+        setDeletingId(scheduleId);
+        try {
+          await scheduleApi.deleteSchedule(scheduleId);
+          message.success('일정이 삭제되었습니다.');
+          await refreshCurrentRange();
+        } catch (error: any) {
+          console.error('Failed to delete schedule:', error);
+          message.error('일정 삭제에 실패했습니다.');
+        } finally {
+          setDeletingId(null);
+        }
+      },
+    });
+  };
 
   const handleEventDrop = async (info: any) => {
     const { event } = info;
@@ -242,6 +277,41 @@ const Calendar: React.FC<CalendarProps> = ({ selectedBots, refreshTrigger }) => 
         locale={koLocale}
         eventClick={(info) => {
           console.log('Event clicked:', info.event.extendedProps);
+        }}
+        eventContent={(arg) => {
+          const scheduleId = parseInt(String(arg.event.id), 10);
+          const sourceSystem = (arg.event.extendedProps as any)?.sourceSystem as string | undefined;
+          const disabled = deletingId === scheduleId;
+
+          return (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%' }}>
+              <div
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+                title={arg.event.title}
+              >
+                {arg.timeText ? `${arg.timeText} ` : ''}
+                {arg.event.title}
+              </div>
+              <Button
+                size="small"
+                danger
+                disabled={disabled || Number.isNaN(scheduleId)}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  if (!Number.isNaN(scheduleId)) confirmDelete(scheduleId, sourceSystem);
+                }}
+              >
+                삭제
+              </Button>
+            </div>
+          );
         }}
         dayMaxEvents={3}
         moreLinkClick="popover"

@@ -22,9 +22,6 @@ const BOT_COLORS = {
  */
 router.get('/', async (req, res) => {
   try {
-    // UI에서 메뉴로 노출하고 싶지 않은 카테고리(내부용)
-    const EXCLUDED_BOT_NAMES = new Set(['일정등록']);
-
     // 기본 BOT 목록 (항상 포함)
     const defaultBots = [
       { id: 'BOT1', name: 'BOT1', color: BOT_COLORS.BOT1 },
@@ -56,11 +53,6 @@ router.get('/', async (req, res) => {
     rows.forEach(row => {
       const botId = row.botId || row.botName;
       const botName = row.botName || row.botId;
-
-      // 내부 카테고리는 BOT 목록(필터 메뉴)에서 제외
-      if (EXCLUDED_BOT_NAMES.has(botId) || EXCLUDED_BOT_NAMES.has(botName)) {
-        return;
-      }
       
       // botName을 기준으로 정규화 (BOT1, BOT2 등으로 매핑)
       let normalizedId = botId;
