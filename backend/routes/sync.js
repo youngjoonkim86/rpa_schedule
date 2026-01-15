@@ -232,29 +232,6 @@ router.post('/rpa-schedules', async (req, res) => {
       for (const s of schedules) map.set(uniqueKey(s), s);
       schedules = Array.from(map.values());
       brityDebug.merged.afterDedupe = schedules.length;
-
-    // Power Automate 설정 여부(그룹핑/등록 로직에서 공통 사용)
-    const powerAutomateEnabled =
-      !!process.env.POWER_AUTOMATE_QUERY_URL && !!process.env.POWER_AUTOMATE_CREATE_URL;
-
-    // (옵션) DB 저장 row 수 절감을 위한 시간 버킷 그룹핑
-    // - PA 자동 등록과 충돌할 수 있어, PA 사용 시에는 기본적으로 비활성 권장
-    const bucketMinutesRaw = parseInt(process.env.BRITY_GROUP_BUCKET_MINUTES || '0', 10);
-    const shouldGroup =
-      Number.isFinite(bucketMinutesRaw) && bucketMinutesRaw > 0 && bucketMinutesRaw % 5 === 0;
-    if (shouldGroup && !powerAutomateEnabled) {
-      const before = schedules.length;
-      schedules = groupSchedulesByTimeBucket(schedules, bucketMinutesRaw, tz);
-      const after = schedules.length;
-      brityDebug.grouping = { enabled: true, bucketMinutes: bucketMinutesRaw, before, after };
-      console.log(`🧺 그룹핑 저장 활성화: ${bucketMinutesRaw}분 버킷 (${before} → ${after})`);
-    } else if (shouldGroup && powerAutomateEnabled) {
-      brityDebug.grouping = {
-        enabled: false,
-        reason: 'POWER_AUTOMATE 사용 중에는 그룹핑 저장을 비활성(정확한 시간/중복 방지)',
-        bucketMinutes: bucketMinutesRaw
-      };
-    }
     } else {
       console.log('📋 1단계: RPA 등록 스케줄 조회 (/schedulings/list)');
       const schedRes = await brityRpaService.getSchedulesWithMeta(startDate, endDate);
@@ -263,8 +240,32 @@ router.post('/rpa-schedules', async (req, res) => {
       brityDebug.merged.beforeDedupe = schedules.length;
       brityDebug.merged.afterDedupe = schedules.length;
     }
-    console.log(`✅ ${schedules.length}개 스케줄 조회 완료\n`);
-    currentSync.progress.total = schedules.length;
+
+    // Power Automate 설정 여부
+    const powerAutomateEnabled =
+      !!process.env.POWER_AUTOMATE_QUERY_URL && !!process.env.POWER_AUTOMATE_CREATE_URL;
+
+    // (옵션) DB 저장 row 수 절감을 위한 시간 버킷 그룹핑
+    // ✅ PA는 원본(정확한 시간)으로 처리, DB는 버킷으로 묶어서 저장
+    const bucketMinutesRaw = parseInt(process.env.BRITY_GROUP_BUCKET_MINUTES || '0', 10);
+    const shouldGroup =
+      Number.isFinite(bucketMinutesRaw) && bucketMinutesRaw > 0 && bucketMinutesRaw % 5 === 0;
+
+    const schedulesForPa = schedules; // 원본
+    const schedulesForDb = shouldGroup
+      ? groupSchedulesByTimeBucket(schedules, bucketMinutesRaw, tz)
+      : schedules;
+
+    brityDebug.grouping = shouldGroup
+      ? { enabled: true, bucketMinutes: bucketMinutesRaw, rawCount: schedulesForPa.length, dbCount: schedulesForDb.length }
+      : { enabled: false, bucketMinutes: 0, rawCount: schedulesForPa.length, dbCount: schedulesForDb.length };
+
+    console.log(
+      `✅ Brity 스케줄 준비 완료: raw=${schedulesForPa.length}, db=${schedulesForDb.length} (group=${shouldGroup ? bucketMinutesRaw + 'm' : 'off'})\n`
+    );
+
+    // progress는 DB 적재 기준(캘린더 반영 기준)
+    currentSync.progress.total = schedulesForDb.length;
     
     let syncCount = 0;
     let errorCount = 0;
@@ -277,32 +278,12 @@ router.post('/rpa-schedules', async (req, res) => {
     let powerAutomateDisabledReason = null;
     let powerAutomateQueryErrors = 0;
     
-    // 2단계: 각 스케줄에 대해 BOT 일정 조회 및 등록
-    for (const schedule of schedules) {
-      try {
-        currentSync.progress.processed += 1;
-
-        // 0단계(중요): DB에 이미 있는지 확인
-        // - 기존에는 "DB 중복이면 continue"로 PA 조회/등록까지 스킵되어,
-        //   "PA에 없으면 등록" 플로우가 누락되는 문제가 생김.
-        // - 이제는: DB 저장만 스킵하고, Power Automate는 계속 조회/등록 수행.
-        const botIdForDb = schedule.botId || schedule.botName;
-        const existsInDb = await Schedule.existsExactActive({
-          botId: botIdForDb,
-          subject: schedule.subject,
-          startIso: schedule.start,
-          endIso: schedule.end
-        });
-        const skipDbUpsert = !!existsInDb;
-        if (skipDbUpsert) {
-          console.log(`⏭️ DB 중복(저장 스킵): ${schedule.botName} - ${schedule.subject} (${schedule.start})`);
-          currentSync.progress.dbSkipped += 1;
-        }
-
-        if (powerAutomateAvailable) {
+    // 2단계: Power Automate 처리(원본 기준)
+    if (powerAutomateAvailable && powerAutomateService && powerAutomateEnabled) {
+      for (const schedule of schedulesForPa) {
+        try {
           let existsInPowerAutomate = false;
           try {
-            // 조회 범위를 넓혀서 중복 체크 (시작 시간 ±1시간)
             const queryStart = new Date(schedule.start);
             queryStart.setHours(queryStart.getHours() - 1);
             const queryEnd = new Date(schedule.end);
@@ -339,63 +320,67 @@ router.post('/rpa-schedules', async (req, res) => {
             powerAutomateQueryErrors += 1;
             currentSync.progress.paQueryErrors += 1;
             const status = queryError?.status || queryError?.response?.status;
-            console.warn(`⚠️ Power Automate 일정 조회 실패 (${schedule.botName}):`, queryError.message);
             // 조회 실패 시 등록하면 중복이 생길 수 있어 안전하게 등록 생략
             existsInPowerAutomate = true;
-
-            // 502/timeout 등 반복될 가능성이 큰 장애면 해당 run에서는 PA를 끈다
             if (!powerAutomateDisabledReason && (status === 502 || status === 503 || status === 504 || queryError.code === 'ETIMEDOUT')) {
               powerAutomateAvailable = false;
               powerAutomateDisabledReason = `Power Automate query failed (${status || queryError.code || 'unknown'})`;
               currentSync.progress.paDisabledReason = powerAutomateDisabledReason;
-              console.warn(`🛑 Power Automate 임시 중단: ${powerAutomateDisabledReason}`);
             }
           }
+
+          if (!powerAutomateAvailable) break;
 
           if (!existsInPowerAutomate) {
-            try {
-              const powerAutomateData = {
-                bot: schedule.botName,
-                subject: schedule.subject,
-                start: { dateTime: schedule.start, timeZone: 'Asia/Seoul' },
-                end: { dateTime: schedule.end, timeZone: 'Asia/Seoul' },
-                body: schedule.body || `프로세스: ${schedule.processName || ''}`
-              };
-
-              await powerAutomateService.createSchedule(powerAutomateData);
-              registeredCount++;
-              currentSync.progress.paRegistered += 1;
-              console.log(`✅ Power Automate 일정 등록: ${schedule.botName} - ${schedule.subject}`);
-            } catch (registerError) {
-              console.warn(`⚠️ Power Automate 일정 등록 실패 (${schedule.botName}):`, registerError.message);
-            }
+            const powerAutomateData = {
+              bot: schedule.botName,
+              subject: schedule.subject,
+              start: { dateTime: schedule.start, timeZone: 'Asia/Seoul' },
+              end: { dateTime: schedule.end, timeZone: 'Asia/Seoul' },
+              body: schedule.body || `프로세스: ${schedule.processName || ''}`
+            };
+            await powerAutomateService.createSchedule(powerAutomateData);
+            registeredCount++;
+            currentSync.progress.paRegistered += 1;
+          } else {
+            skippedCount++;
+            currentSync.progress.paSkipped += 1;
           }
-        } else if (!powerAutomateEnabled) {
-          // 설정이 없으면 PA 조회/등록 자체를 수행하지 않음(명확히)
-          console.log('ℹ️ Power Automate 미사용: POWER_AUTOMATE_QUERY_URL/CREATE_URL 미설정');
-        } else if (powerAutomateDisabledReason) {
-          // 장애로 인해 run 중 임시 중단된 상태
-          // (로그 스팸 방지: 매 건마다 찍지 않음)
+        } catch (e) {
+          // PA 실패는 전체 동기화 실패로 보지 않음
         }
-        
-        // 3단계: DB에 저장 또는 업데이트 (중복이면 저장 스킵)
-        if (!skipDbUpsert) {
-          await Schedule.upsert({
-            bot_id: schedule.botId || schedule.botName, // botId가 없으면 botName 사용
-            bot_name: schedule.botName,
-            subject: schedule.subject,
-            start_datetime: schedule.start,
-            end_datetime: schedule.end,
-            body: schedule.body,
-            process_id: schedule.processId,
-            source_system: 'BRITY_RPA'
-          });
-          syncCount++;
-          currentSync.progress.dbUpserted += 1;
-        } else {
-          skippedCount++;
+      }
+    }
+
+    // 3단계: DB 적재(그룹핑 기준)
+    for (const schedule of schedulesForDb) {
+      try {
+        currentSync.progress.processed += 1;
+
+        const botIdForDb = schedule.botId || schedule.botName;
+        const existsInDb = await Schedule.existsExactActive({
+          botId: botIdForDb,
+          subject: schedule.subject,
+          startIso: schedule.start,
+          endIso: schedule.end
+        });
+        if (existsInDb) {
           currentSync.progress.dbSkipped += 1;
+          continue;
         }
+
+        await Schedule.upsert({
+          bot_id: schedule.botId || schedule.botName,
+          bot_name: schedule.botName,
+          subject: schedule.subject,
+          start_datetime: schedule.start,
+          end_datetime: schedule.end,
+          body: schedule.body,
+          process_id: schedule.processId,
+          source_system: 'BRITY_RPA'
+        });
+        syncCount++;
+        currentSync.progress.dbUpserted += 1;
       } catch (error) {
         console.error(`❌ 스케줄 처리 실패 (${schedule.id}):`, error.message);
         errorCount++;
@@ -430,7 +415,8 @@ router.post('/rpa-schedules', async (req, res) => {
     }
     
     console.log(`\n✅ 동기화 완료:`);
-    console.log(`   - 총 스케줄 (nextJobTime 있음): ${schedules.length}개`);
+    console.log(`   - 총 스케줄(raw): ${schedulesForPa.length}개`);
+    console.log(`   - DB 대상(db): ${schedulesForDb.length}개`);
     console.log(`   - DB 저장/업데이트: ${syncCount}개 (중복은 자동으로 업데이트됨)`);
     console.log(`   - Power Automate 등록: ${registeredCount}개`);
     console.log(`   - Power Automate 건너뜀 (이미 존재): ${skippedCount}개`);
