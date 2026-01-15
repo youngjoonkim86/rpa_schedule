@@ -1,11 +1,11 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import FullCalendar from '@fullcalendar/react';
 import dayGridPlugin from '@fullcalendar/daygrid';
 import timeGridPlugin from '@fullcalendar/timegrid';
 import interactionPlugin from '@fullcalendar/interaction';
 import { EventInput } from '@fullcalendar/core';
 import { scheduleApi, Schedule } from '../services/api';
-import { message } from 'antd';
+import { Input, Select, Space, Typography, message } from 'antd';
 import dayjs from 'dayjs';
 import 'dayjs/locale/ko';
 import koLocale from '@fullcalendar/core/locales/ko';
@@ -13,15 +13,22 @@ import BrityFailuresPanel from './BrityFailuresPanel';
 
 dayjs.locale('ko');
 
+const { Text } = Typography;
+
 interface CalendarProps {
   selectedBots: string[];
   refreshTrigger?: number;
 }
 
 const Calendar: React.FC<CalendarProps> = ({ selectedBots, refreshTrigger }) => {
-  const [events, setEvents] = useState<EventInput[]>([]);
+  const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [loading, setLoading] = useState(false);
   const calendarRef = useRef<FullCalendar>(null);
+  const [lastRange, setLastRange] = useState<{ start: Date; end: Date } | null>(null);
+
+  // 과제(제목/프로세스) 필터
+  const [taskQuery, setTaskQuery] = useState<string>('');
+  const [selectedTasks, setSelectedTasks] = useState<string[]>([]);
 
   const getBotColor = (botId: string): string => {
     const colors: { [key: string]: string } = {
@@ -40,7 +47,7 @@ const Calendar: React.FC<CalendarProps> = ({ selectedBots, refreshTrigger }) => 
     return colors[botId] || '#95A5A6';
   };
 
-  const fetchEvents = async (start: Date, end: Date) => {
+  const fetchSchedules = async (start: Date, end: Date) => {
     setLoading(true);
     try {
       // 캘린더에 표시된 전체 범위를 조회 (과거 날짜 포함)
@@ -49,37 +56,7 @@ const Calendar: React.FC<CalendarProps> = ({ selectedBots, refreshTrigger }) => 
       const endDate = dayjs(end).format('YYYY-MM-DD');
       
       const response = await scheduleApi.getSchedules(startDate, endDate);
-      
-      // FullCalendar 형식으로 변환
-      const formattedEvents: EventInput[] = response.data.data
-        .filter((schedule: Schedule) => {
-          // botId 또는 botName으로 필터링
-          return selectedBots.length === 0 || 
-                 selectedBots.includes(schedule.botId) || 
-                 selectedBots.includes(schedule.botName);
-        })
-        .map((schedule: Schedule) => {
-          // botId가 없으면 botName 사용
-          const displayBotId = schedule.botId || schedule.botName || 'UNKNOWN';
-          const colorBotId = schedule.botId || schedule.botName || 'BOT1';
-          
-          return {
-            id: schedule.id.toString(),
-            title: `[${displayBotId}] ${schedule.subject}`,
-            start: schedule.start,
-            end: schedule.end,
-            backgroundColor: getBotColor(colorBotId),
-            borderColor: getBotColor(colorBotId),
-            extendedProps: {
-              botId: schedule.botId || schedule.botName,
-              botName: schedule.botName,
-              body: schedule.body,
-              sourceSystem: schedule.sourceSystem
-            }
-          };
-        });
-      
-      setEvents(formattedEvents);
+      setSchedules(response.data.data || []);
     } catch (error: any) {
       console.error('Failed to fetch events:', error);
       const errorMsg = error.userMessage || error.message || '일정을 불러오는데 실패했습니다.';
@@ -87,12 +64,68 @@ const Calendar: React.FC<CalendarProps> = ({ selectedBots, refreshTrigger }) => 
       
       // 네트워크 오류인 경우 빈 배열로 설정하여 UI가 깨지지 않도록
       if (error.code === 'ERR_NETWORK' || error.message === 'Network Error') {
-        setEvents([]);
+        setSchedules([]);
       }
     } finally {
       setLoading(false);
     }
   };
+
+  const taskOptions = useMemo(() => {
+    // 현재 조회된 범위 내에서 subject 기반 옵션 생성
+    const set = new Set<string>();
+    for (const s of schedules) {
+      if (s?.subject) set.add(String(s.subject));
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [schedules]);
+
+  const events: EventInput[] = useMemo(() => {
+    const q = taskQuery.trim().toLowerCase();
+
+    const filtered = schedules.filter((s: Schedule) => {
+      // 1) BOT 필터 (기존 캘린더 필터와 동일)
+      const botOk =
+        selectedBots.length === 0 ||
+        selectedBots.includes(s.botId) ||
+        selectedBots.includes(s.botName);
+
+      if (!botOk) return false;
+
+      // 2) 과제 선택 필터 (subject 정확 매칭)
+      if (selectedTasks.length > 0 && !selectedTasks.includes(s.subject)) return false;
+
+      // 3) 과제 검색 필터 (subject/body 포함 검색)
+      if (q) {
+        const subject = String(s.subject || '').toLowerCase();
+        const body = String((s as any).body || '').toLowerCase();
+        if (!subject.includes(q) && !body.includes(q)) return false;
+      }
+
+      return true;
+    });
+
+    return filtered.map((schedule: Schedule) => {
+      const displayBotId = schedule.botId || schedule.botName || 'UNKNOWN';
+      const colorBotId = schedule.botId || schedule.botName || 'BOT1';
+
+      return {
+        id: schedule.id.toString(),
+        title: `[${displayBotId}] ${schedule.subject}`,
+        start: schedule.start,
+        end: schedule.end,
+        backgroundColor: getBotColor(colorBotId),
+        borderColor: getBotColor(colorBotId),
+        extendedProps: {
+          botId: schedule.botId || schedule.botName,
+          botName: schedule.botName,
+          subject: schedule.subject,
+          body: schedule.body,
+          sourceSystem: schedule.sourceSystem,
+        },
+      };
+    });
+  }, [schedules, selectedBots, selectedTasks, taskQuery]);
 
   const handleEventDrop = async (info: any) => {
     const { event } = info;
@@ -125,13 +158,16 @@ const Calendar: React.FC<CalendarProps> = ({ selectedBots, refreshTrigger }) => 
 
   // 외부에서 새로고침 트리거 (일정 추가/수정 후)
   useEffect(() => {
-    if (refreshTrigger && calendarRef.current) {
-      const calendarApi = calendarRef.current.getApi();
-      const view = calendarApi.view;
-      if (view) {
-        fetchEvents(view.activeStart, view.activeEnd);
-      }
+    if (!refreshTrigger) return;
+    if (lastRange) {
+      fetchSchedules(lastRange.start, lastRange.end);
+      return;
     }
+    if (calendarRef.current) {
+      const view = calendarRef.current.getApi().view;
+      if (view) fetchSchedules(view.activeStart, view.activeEnd);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshTrigger]);
 
   return (
@@ -151,6 +187,32 @@ const Calendar: React.FC<CalendarProps> = ({ selectedBots, refreshTrigger }) => 
           일정을 불러오는 중...
         </div>
       )}
+
+      {/* 캘린더 과제(Subject) 필터 */}
+      <div style={{ marginBottom: 12 }}>
+        <Space wrap>
+          <Input
+            style={{ width: 260 }}
+            placeholder="과제(제목/설명) 검색"
+            value={taskQuery}
+            onChange={(e) => setTaskQuery(e.target.value)}
+            allowClear
+          />
+          <Select
+            style={{ width: 360 }}
+            mode="multiple"
+            placeholder="과제 선택(현재 범위 내)"
+            value={selectedTasks}
+            onChange={(v) => setSelectedTasks(v)}
+            allowClear
+            showSearch
+            optionFilterProp="label"
+            options={taskOptions.map(v => ({ label: v, value: v }))}
+          />
+          <Text type="secondary">표시 일정: {events.length}건</Text>
+        </Space>
+      </div>
+
       <FullCalendar
         ref={calendarRef}
         plugins={[dayGridPlugin, timeGridPlugin, interactionPlugin]}
@@ -170,7 +232,8 @@ const Calendar: React.FC<CalendarProps> = ({ selectedBots, refreshTrigger }) => 
         select={handleDateSelect}
         datesSet={(dateInfo) => {
           // 캘린더에 표시된 전체 날짜 범위 조회 (과거 포함)
-          fetchEvents(dateInfo.start, dateInfo.end);
+          setLastRange({ start: dateInfo.start, end: dateInfo.end });
+          fetchSchedules(dateInfo.start, dateInfo.end);
         }}
         height="auto"
         locale={koLocale}
