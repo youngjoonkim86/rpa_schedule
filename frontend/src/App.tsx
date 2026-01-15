@@ -59,6 +59,7 @@ function App() {
   const handleSync = async () => {
     setSyncLoading(true);
     const startedAtMs = Date.now();
+    let didTimeout = false;
     try {
       const now = dayjs();
       // 당월 기준 -7일: 현재 월의 첫날에서 7일 전
@@ -94,6 +95,7 @@ function App() {
       // 프론트 요청 타임아웃이어도 서버는 계속 동기화 중일 수 있으므로
       // /sync/status 를 폴링해서 "서버 완료" 시점까지 로딩을 유지한다.
       if (error.code === 'ECONNABORTED') {
+        didTimeout = true;
         message.warning('동기화 요청이 타임아웃되었습니다. 서버에서 계속 진행 중인지 상태를 확인합니다...', 5);
 
         const maxWaitMs = 30 * 60 * 1000; // 30분
@@ -111,7 +113,17 @@ function App() {
 
           try {
             const statusRes = await syncApi.getSyncStatus();
-            const latest: any = statusRes.data?.data;
+            const data: any = statusRes.data?.data;
+
+            // 1) 진행 중이면 계속 스피너 유지
+            if (data?.inProgress) {
+              // 필요하면 여기서 진행률 표시도 가능: data.progress
+              await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+              continue;
+            }
+
+            // 2) 완료면 latest 로그 기준으로 종료
+            const latest: any = data?.latest || data;
             if (latest) {
               const tsRaw = latest.sync_datetime || latest.syncDatetime || latest.syncDatetimeUtc;
               const latestMs = tsRaw ? new Date(tsRaw).getTime() : 0;
@@ -140,6 +152,8 @@ function App() {
           await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
         }
 
+        // 폴링 종료 후 스피너 종료
+        setSyncLoading(false);
         return;
       } else if (error.response?.data?.error) {
         errorMessage = error.response.data.error;
@@ -147,7 +161,8 @@ function App() {
       
       message.error(errorMessage, 10); // 10초간 표시
     } finally {
-      setSyncLoading(false);
+      // 타임아웃 폴링 경로에서는 폴링 종료 시점에 직접 setSyncLoading(false) 처리
+      if (!didTimeout) setSyncLoading(false);
     }
   };
 

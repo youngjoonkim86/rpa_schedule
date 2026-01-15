@@ -7,6 +7,27 @@ const db = require('../config/database');
 const moment = require('moment-timezone');
 const redis = require('../config/redis');
 
+// ✅ 동기화 "진행 중" 상태(메모리)
+// - 프론트가 DB 적재가 끝날 때까지 "동기화 중" 표시를 유지할 수 있도록 진행률 제공
+// - 단일 프로세스 기준(멀티 인스턴스/클러스터면 Redis/DB로 옮겨야 함)
+const currentSync = {
+  inProgress: false,
+  startedAt: null,   // ISO
+  finishedAt: null,  // ISO
+  range: null,       // { startDate, endDate }
+  progress: {
+    total: 0,
+    processed: 0,
+    dbUpserted: 0,
+    dbSkipped: 0,
+    failed: 0,
+    paRegistered: 0,
+    paSkipped: 0,
+    paQueryErrors: 0,
+    paDisabledReason: null,
+  }
+};
+
 /**
  * GET /api/sync/logs - 동기화 로그 조회
  */
@@ -47,6 +68,20 @@ router.get('/logs', async (req, res) => {
  */
 router.get('/status', async (req, res) => {
   try {
+    // 동기화 진행 중이면 DB 로그보다 우선 응답
+    if (currentSync.inProgress) {
+      return res.json({
+        success: true,
+        data: {
+          inProgress: true,
+          startedAt: currentSync.startedAt,
+          finishedAt: currentSync.finishedAt,
+          range: currentSync.range,
+          progress: currentSync.progress
+        }
+      });
+    }
+
     const [latest] = await db.execute(
       `SELECT * FROM sync_logs 
        WHERE sync_type = 'BRITY_RPA' 
@@ -64,7 +99,10 @@ router.get('/status', async (req, res) => {
     
     res.json({
       success: true,
-      data: latest[0]
+      data: {
+        inProgress: false,
+        latest: latest[0]
+      }
     });
   } catch (error) {
     console.error('동기화 상태 조회 오류:', error);
@@ -80,6 +118,20 @@ router.get('/status', async (req, res) => {
  * POST /api/sync/rpa-schedules - Brity RPA 스케줄 동기화
  */
 router.post('/rpa-schedules', async (req, res) => {
+  // 중복 실행 방지
+  if (currentSync.inProgress) {
+    return res.status(409).json({
+      success: false,
+      message: '동기화가 이미 진행 중입니다. 잠시 후 다시 시도해주세요.',
+      data: {
+        inProgress: true,
+        startedAt: currentSync.startedAt,
+        range: currentSync.range,
+        progress: currentSync.progress
+      }
+    });
+  }
+
   try {
     let { startDate, endDate, britySource } = req.body;
     
@@ -99,6 +151,23 @@ router.post('/rpa-schedules', async (req, res) => {
     }
     
     console.log(`🔄 Brity RPA 동기화 시작: ${startDate} ~ ${endDate}`);
+
+    // 진행 상태 초기화
+    currentSync.inProgress = true;
+    currentSync.startedAt = new Date().toISOString();
+    currentSync.finishedAt = null;
+    currentSync.range = { startDate, endDate };
+    currentSync.progress = {
+      total: 0,
+      processed: 0,
+      dbUpserted: 0,
+      dbSkipped: 0,
+      failed: 0,
+      paRegistered: 0,
+      paSkipped: 0,
+      paQueryErrors: 0,
+      paDisabledReason: null,
+    };
     
     // 1단계: Brity RPA API에서 스케줄 조회
     // britySource:
@@ -150,6 +219,7 @@ router.post('/rpa-schedules', async (req, res) => {
       schedules = await brityRpaService.getSchedules(startDate, endDate);
     }
     console.log(`✅ ${schedules.length}개 스케줄 조회 완료\n`);
+    currentSync.progress.total = schedules.length;
     
     let syncCount = 0;
     let errorCount = 0;
@@ -167,6 +237,8 @@ router.post('/rpa-schedules', async (req, res) => {
     // 2단계: 각 스케줄에 대해 BOT 일정 조회 및 등록
     for (const schedule of schedules) {
       try {
+        currentSync.progress.processed += 1;
+
         // 0단계(중요): DB에 이미 있는지 확인
         // - 기존에는 "DB 중복이면 continue"로 PA 조회/등록까지 스킵되어,
         //   "PA에 없으면 등록" 플로우가 누락되는 문제가 생김.
@@ -181,6 +253,7 @@ router.post('/rpa-schedules', async (req, res) => {
         const skipDbUpsert = !!existsInDb;
         if (skipDbUpsert) {
           console.log(`⏭️ DB 중복(저장 스킵): ${schedule.botName} - ${schedule.subject} (${schedule.start})`);
+          currentSync.progress.dbSkipped += 1;
         }
 
         if (powerAutomateAvailable) {
@@ -221,6 +294,7 @@ router.post('/rpa-schedules', async (req, res) => {
             }
           } catch (queryError) {
             powerAutomateQueryErrors += 1;
+            currentSync.progress.paQueryErrors += 1;
             const status = queryError?.status || queryError?.response?.status;
             console.warn(`⚠️ Power Automate 일정 조회 실패 (${schedule.botName}):`, queryError.message);
             // 조회 실패 시 등록하면 중복이 생길 수 있어 안전하게 등록 생략
@@ -230,6 +304,7 @@ router.post('/rpa-schedules', async (req, res) => {
             if (!powerAutomateDisabledReason && (status === 502 || status === 503 || status === 504 || queryError.code === 'ETIMEDOUT')) {
               powerAutomateAvailable = false;
               powerAutomateDisabledReason = `Power Automate query failed (${status || queryError.code || 'unknown'})`;
+              currentSync.progress.paDisabledReason = powerAutomateDisabledReason;
               console.warn(`🛑 Power Automate 임시 중단: ${powerAutomateDisabledReason}`);
             }
           }
@@ -246,6 +321,7 @@ router.post('/rpa-schedules', async (req, res) => {
 
               await powerAutomateService.createSchedule(powerAutomateData);
               registeredCount++;
+              currentSync.progress.paRegistered += 1;
               console.log(`✅ Power Automate 일정 등록: ${schedule.botName} - ${schedule.subject}`);
             } catch (registerError) {
               console.warn(`⚠️ Power Automate 일정 등록 실패 (${schedule.botName}):`, registerError.message);
@@ -272,12 +348,15 @@ router.post('/rpa-schedules', async (req, res) => {
             source_system: 'BRITY_RPA'
           });
           syncCount++;
+          currentSync.progress.dbUpserted += 1;
         } else {
           skippedCount++;
+          currentSync.progress.dbSkipped += 1;
         }
       } catch (error) {
         console.error(`❌ 스케줄 처리 실패 (${schedule.id}):`, error.message);
         errorCount++;
+        currentSync.progress.failed += 1;
       }
     }
     
@@ -346,6 +425,12 @@ router.post('/rpa-schedules', async (req, res) => {
       message: '동기화 중 오류가 발생했습니다.',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
+  } finally {
+    // 진행 상태 종료
+    if (currentSync.inProgress) {
+      currentSync.inProgress = false;
+      currentSync.finishedAt = new Date().toISOString();
+    }
   }
 });
 
