@@ -60,6 +60,61 @@ function App() {
     setSyncLoading(true);
     const startedAtMs = Date.now();
     let didTimeout = false;
+
+    const pollUntilDone = async () => {
+      const maxWaitMs = 30 * 60 * 1000; // 30분
+      const pollIntervalMs = 5000; // 5초
+      const deadline = Date.now() + maxWaitMs;
+
+      // 완료될 때까지 상태 폴링
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        if (Date.now() > deadline) {
+          message.error('동기화 상태 확인 시간이 초과되었습니다. 잠시 후 다시 확인해주세요.', 10);
+          break;
+        }
+
+        try {
+          const statusRes = await syncApi.getSyncStatus();
+          const data: any = statusRes.data?.data;
+
+          // 1) 진행 중이면 계속 스피너 유지
+          if (data?.inProgress) {
+            await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+            continue;
+          }
+
+          // 2) 완료면 latest 로그 기준으로 종료
+          const latest: any = data?.latest || data;
+          if (latest) {
+            const tsRaw = latest.sync_datetime || latest.syncDatetime || latest.syncDatetimeUtc;
+            const latestMs = tsRaw ? new Date(tsRaw).getTime() : 0;
+            if (latestMs && latestMs >= startedAtMs) {
+              const syncStatus = latest.sync_status || latest.syncStatus;
+              const synced = latest.records_synced ?? latest.recordsSynced ?? 0;
+
+              if (syncStatus === 'SUCCESS' || syncStatus === 'PARTIAL') {
+                message.success(`동기화 완료! (DB 저장/업데이트: ${synced}개)`, 6);
+                setCalendarRefresh(prev => prev + 1);
+                loadBots();
+              } else if (syncStatus === 'FAILED') {
+                message.error(`동기화 실패: ${latest.error_message || latest.errorMessage || ''}`, 10);
+              } else {
+                message.info('동기화가 완료되었습니다. 캘린더를 새로고침합니다.', 5);
+                setCalendarRefresh(prev => prev + 1);
+                loadBots();
+              }
+              break;
+            }
+          }
+        } catch (statusErr) {
+          // 상태 조회가 실패해도 잠시 후 재시도
+        }
+
+        await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+      }
+    };
+
     try {
       const now = dayjs();
       // 당월 기준 -7일: 현재 월의 첫날에서 7일 전
@@ -73,21 +128,22 @@ function App() {
         startDate.format('YYYY-MM-DD'),
         endDate.format('YYYY-MM-DD')
       );
-      
-      const details = [];
-      if (response.data.recordsSynced) details.push(`DB 저장: ${response.data.recordsSynced}개`);
-      if (response.data.recordsRegistered) details.push(`등록: ${response.data.recordsRegistered}개`);
-      if (response.data.recordsSkipped) details.push(`건너뜀: ${response.data.recordsSkipped}개`);
-      if (response.data.recordsFailed) details.push(`실패: ${response.data.recordsFailed}개`);
-      
-      message.success(
-        `동기화 완료! ${details.join(', ')}`,
-        5 // 5초간 표시
-      );
-      
-      // 캘린더/봇 목록 새로고침 (페이지 리로드 대신)
-      setCalendarRefresh(prev => prev + 1);
-      loadBots();
+
+      // ✅ 202(동기화 시작) 응답일 수 있으므로, status 폴링으로 완료까지 대기
+      // (Cloudflare 터널 524를 피하기 위해 백엔드가 202로 즉시 응답하도록 변경됨)
+      if (response?.status === 202 || response?.data?.data?.inProgress) {
+        await pollUntilDone();
+      } else {
+        // 혹시라도 동기화가 즉시 완료되는 케이스(로컬/소량) 대비
+        const details = [];
+        if (response.data.recordsSynced) details.push(`DB 저장: ${response.data.recordsSynced}개`);
+        if (response.data.recordsRegistered) details.push(`등록: ${response.data.recordsRegistered}개`);
+        if (response.data.recordsSkipped) details.push(`건너뜀: ${response.data.recordsSkipped}개`);
+        if (response.data.recordsFailed) details.push(`실패: ${response.data.recordsFailed}개`);
+        message.success(`동기화 완료! ${details.join(', ')}`, 5);
+        setCalendarRefresh(prev => prev + 1);
+        loadBots();
+      }
     } catch (error: any) {
       console.error('Failed to sync:', error);
       
@@ -103,62 +159,7 @@ function App() {
             : '동기화 요청이 타임아웃되었습니다. 서버에서 계속 진행 중인지 상태를 확인합니다...',
           5
         );
-
-        const maxWaitMs = 30 * 60 * 1000; // 30분
-        const pollIntervalMs = 5000; // 5초
-        const deadline = Date.now() + maxWaitMs;
-
-        // 완료될 때까지 상태 폴링
-        // (sync_logs는 완료 시점에 기록되므로, startedAt 이후의 로그가 보이면 완료로 간주)
-        // eslint-disable-next-line no-constant-condition
-        while (true) {
-          if (Date.now() > deadline) {
-            message.error('동기화 상태 확인 시간이 초과되었습니다. 잠시 후 다시 확인해주세요.', 10);
-            break;
-          }
-
-          try {
-            const statusRes = await syncApi.getSyncStatus();
-            const data: any = statusRes.data?.data;
-
-            // 1) 진행 중이면 계속 스피너 유지
-            if (data?.inProgress) {
-              // 필요하면 여기서 진행률 표시도 가능: data.progress
-              await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
-              continue;
-            }
-
-            // 2) 완료면 latest 로그 기준으로 종료
-            const latest: any = data?.latest || data;
-            if (latest) {
-              const tsRaw = latest.sync_datetime || latest.syncDatetime || latest.syncDatetimeUtc;
-              const latestMs = tsRaw ? new Date(tsRaw).getTime() : 0;
-              if (latestMs && latestMs >= startedAtMs) {
-                const syncStatus = latest.sync_status || latest.syncStatus;
-                const synced = latest.records_synced ?? latest.recordsSynced ?? 0;
-
-                if (syncStatus === 'SUCCESS' || syncStatus === 'PARTIAL') {
-                  message.success(`동기화 완료! (DB 저장/업데이트: ${synced}개)`, 6);
-                  setCalendarRefresh(prev => prev + 1);
-                  loadBots();
-                } else if (syncStatus === 'FAILED') {
-                  message.error(`동기화 실패: ${latest.error_message || latest.errorMessage || ''}`, 10);
-                } else {
-                  message.info('동기화가 완료되었습니다. 캘린더를 새로고침합니다.', 5);
-                  setCalendarRefresh(prev => prev + 1);
-                  loadBots();
-                }
-                break;
-              }
-            }
-          } catch (statusErr) {
-            // 상태 조회가 실패해도 잠시 후 재시도
-          }
-
-          await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
-        }
-
-        // 폴링 종료 후 스피너 종료
+        await pollUntilDone();
         setSyncLoading(false);
         return;
       } else if (error.response?.data?.error) {
