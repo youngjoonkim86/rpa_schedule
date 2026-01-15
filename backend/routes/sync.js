@@ -16,6 +16,7 @@ const currentSync = {
   startedAt: null,   // ISO
   finishedAt: null,  // ISO
   range: null,       // { startDate, endDate }
+  lastResult: null,  // 마지막 동기화 결과 요약(메모리)
   progress: {
     total: 0,
     processed: 0,
@@ -78,7 +79,8 @@ router.get('/status', async (req, res) => {
           startedAt: currentSync.startedAt,
           finishedAt: currentSync.finishedAt,
           range: currentSync.range,
-          progress: currentSync.progress
+          progress: currentSync.progress,
+          lastResult: currentSync.lastResult
         }
       });
     }
@@ -102,7 +104,8 @@ router.get('/status', async (req, res) => {
       success: true,
       data: {
         inProgress: false,
-        latest: latest[0]
+        latest: latest[0],
+        lastResult: currentSync.lastResult
       }
     });
   } catch (error) {
@@ -296,6 +299,7 @@ router.post('/rpa-schedules', async (req, res) => {
     
     // 2단계: Power Automate 처리(원본 기준)
     if (powerAutomateAvailable && powerAutomateService && powerAutomateEnabled) {
+      console.log(`🔗 Power Automate 연동: enabled=true, query=${!!process.env.POWER_AUTOMATE_QUERY_URL}, create=${!!process.env.POWER_AUTOMATE_CREATE_URL}`);
       for (const schedule of schedulesForPa) {
         try {
           let existsInPowerAutomate = false;
@@ -454,11 +458,35 @@ router.post('/rpa-schedules', async (req, res) => {
     console.log(`   - Power Automate 등록: ${registeredCount}개`);
     console.log(`   - Power Automate 건너뜀 (이미 존재): ${skippedCount}개`);
     console.log(`   - 실패: ${errorCount}개`);
+
+    // ✅ 마지막 결과 요약 저장(프론트/점검용)
+    currentSync.lastResult = {
+      finishedAt: new Date().toISOString(),
+      range: { startDate, endDate },
+      rawCount: schedulesForPa.length,
+      dbCount: schedulesForDb.length,
+      dbUpserted: syncCount,
+      dbSkipped: currentSync.progress.dbSkipped,
+      failed: errorCount,
+      paEnabled: powerAutomateEnabled,
+      paAvailable: powerAutomateAvailable,
+      paRegistered: currentSync.progress.paRegistered,
+      paSkipped: currentSync.progress.paSkipped,
+      paQueryErrors: currentSync.progress.paQueryErrors,
+      paDisabledReason: currentSync.progress.paDisabledReason,
+      brity: brityDebug
+    };
     
       // (이미 202 응답을 보냈으므로 여기서는 응답을 보내지 않음)
       // 완료 정보는 sync_logs 및 /api/sync/status 에서 확인
     } catch (error) {
       console.error('동기화 오류:', error);
+
+      currentSync.lastResult = {
+        finishedAt: new Date().toISOString(),
+        range: currentSync.range,
+        error: error.message
+      };
     
     // 에러 로그 기록
     try {
