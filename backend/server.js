@@ -60,7 +60,10 @@ app.use(express.urlencoded({ extended: true }));
 // Rate Limiting
 const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000, // 15분
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100 // 최대 100 요청
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100, // 최대 100 요청
+  // ✅ 프론트가 동기화 완료까지 폴링(/api/sync/status) 하므로 기본 rate limit에 걸리기 쉬움
+  // - status는 읽기 전용이며 비용이 낮아 예외 처리
+  skip: (req) => req.path === '/sync/status'
 });
 app.use('/api/', limiter);
 
