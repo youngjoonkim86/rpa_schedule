@@ -56,18 +56,14 @@ if (brityRpaService && Schedule && db) {
     if (effectiveBritySource === 'schedulings') {
       schedules = await brityRpaService.getSchedules(startDateStr, endDateStr);
     } else {
-      // 기본: /jobs/list (실행 이력)
-      // + 미래(오늘 이후) 일정은 /schedulings/list 로 추가 조회
-      const jobsEnd = endDateStr < todayStr ? endDateStr : todayStr;
-      if (startDateStr <= jobsEnd) {
-        const startIso = moment.tz(startDateStr, 'YYYY-MM-DD', tz).startOf('day').toISOString();
-        const endIso = moment.tz(jobsEnd, 'YYYY-MM-DD', tz).endOf('day').toISOString();
-        schedules.push(...(await brityRpaService.getJobResults(startIso, endIso)));
-      }
+      // ✅ /jobs/list가 미래 일정도 내려오는 환경이 있어, 전체 범위를 그대로 조회
+      const startIso = moment.tz(startDateStr, 'YYYY-MM-DD', tz).startOf('day').toISOString();
+      const endIso = moment.tz(endDateStr, 'YYYY-MM-DD', tz).endOf('day').toISOString();
+      schedules = await brityRpaService.getJobResults(startIso, endIso);
 
-      const schedStart = startDateStr > todayStr ? startDateStr : todayStr;
-      if (schedStart <= endDateStr) {
-        schedules.push(...(await brityRpaService.getSchedules(schedStart, endDateStr)));
+      const mergeSchedulings = String(process.env.BRITY_SYNC_MERGE_SCHEDULINGS || 'false').toLowerCase() === 'true';
+      if (mergeSchedulings) {
+        schedules = [...schedules, ...(await brityRpaService.getSchedules(startDateStr, endDateStr))];
       }
 
       const map = new Map();

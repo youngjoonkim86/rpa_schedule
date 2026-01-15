@@ -190,24 +190,21 @@ router.post('/rpa-schedules', async (req, res) => {
 
     let schedules = [];
     if (effectiveBritySource === 'jobs') {
-      // 기본: /jobs/list (실행 이력)
-      // + 미래(오늘 이후) 일정은 /schedulings/list 로 추가 조회하여 캘린더에 표시되게 함
-      console.log('📋 1단계: Brity 실행 결과 조회 (/jobs/list) + 미래 등록 스케줄 병합(/schedulings/list)');
+      // ✅ 실제 운영 환경에서 /jobs/list가 "오늘 이후"도 내려오는 케이스가 있어
+      // start~end 전체 범위를 그대로 /jobs/list로 조회해야 합니다.
+      console.log('📋 1단계: Brity 스케줄/이력 조회 (/jobs/list, 전체 범위)');
+      const startIso = moment.tz(startDate, 'YYYY-MM-DD', tz).startOf('day').toISOString();
+      const endIso = moment.tz(endDate, 'YYYY-MM-DD', tz).endOf('day').toISOString();
+      schedules = await brityRpaService.getJobResults(startIso, endIso);
 
-      // jobs 구간: startDate ~ min(endDate, today)
-      const jobsEnd = endDate < todayStr ? endDate : todayStr;
-      if (startDate <= jobsEnd) {
-        const startIso = moment.tz(startDate, 'YYYY-MM-DD', tz).startOf('day').toISOString();
-        const endIso = moment.tz(jobsEnd, 'YYYY-MM-DD', tz).endOf('day').toISOString();
-        const jobSchedules = await brityRpaService.getJobResults(startIso, endIso);
-        schedules.push(...jobSchedules);
-      }
-
-      // schedulings 구간: max(startDate, today) ~ endDate (오늘 이후 포함)
-      const schedStart = startDate > todayStr ? startDate : todayStr;
-      if (schedStart <= endDate) {
-        const futureSchedules = await brityRpaService.getSchedules(schedStart, endDate);
-        schedules.push(...futureSchedules);
+      // 필요 시(환경별) 등록 스케줄 API도 병합할 수 있게 옵션 제공
+      // - default: false (jobs/list만 사용)
+      // - enable: BRITY_SYNC_MERGE_SCHEDULINGS=true
+      const mergeSchedulings = String(process.env.BRITY_SYNC_MERGE_SCHEDULINGS || 'false').toLowerCase() === 'true';
+      if (mergeSchedulings) {
+        console.log('➕ 옵션: /schedulings/* 병합 활성화');
+        const extra = await brityRpaService.getSchedules(startDate, endDate);
+        schedules = [...schedules, ...extra];
       }
 
       // 중복 제거
