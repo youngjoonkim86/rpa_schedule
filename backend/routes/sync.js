@@ -5,6 +5,7 @@ const powerAutomateService = require('../services/powerAutomateService');
 const Schedule = require('../models/Schedule');
 const db = require('../config/database');
 const moment = require('moment-timezone');
+const redis = require('../config/redis');
 
 /**
  * GET /api/sync/logs - 동기화 로그 조회
@@ -154,6 +155,9 @@ router.post('/rpa-schedules', async (req, res) => {
     let errorCount = 0;
     let registeredCount = 0;
     let skippedCount = 0;
+
+    const powerAutomateEnabled =
+      !!process.env.POWER_AUTOMATE_QUERY_URL && !!process.env.POWER_AUTOMATE_CREATE_URL;
     
     // 2단계: 각 스케줄에 대해 BOT 일정 조회 및 등록
     for (const schedule of schedules) {
@@ -174,82 +178,70 @@ router.post('/rpa-schedules', async (req, res) => {
           console.log(`⏭️ DB 중복(저장 스킵): ${schedule.botName} - ${schedule.subject} (${schedule.start})`);
         }
 
-        // 2-1: Power Automate에서 BOT 일정 조회
-        const startDateTime = new Date(schedule.start).toISOString();
-        const endDateTime = new Date(schedule.end).toISOString();
-        
-        let existsInPowerAutomate = false;
-        try {
-          // 조회 범위를 넓혀서 중복 체크 (시작 시간 ±1시간)
-          const queryStart = new Date(schedule.start);
-          queryStart.setHours(queryStart.getHours() - 1);
-          const queryEnd = new Date(schedule.end);
-          queryEnd.setHours(queryEnd.getHours() + 1);
-          
-          const queryResult = await powerAutomateService.querySchedules(
-            queryStart.toISOString(), 
-            queryEnd.toISOString()
-          );
-          
-          // 조회된 일정 중에서 동일한 BOT과 시간대의 일정이 있는지 확인
-          if (queryResult.events && Array.isArray(queryResult.events)) {
-            existsInPowerAutomate = queryResult.events.some(event => {
-              const eventStart = new Date(event.start?.dateTime || event.start);
-              const eventEnd = new Date(event.end?.dateTime || event.end);
-              const scheduleStart = new Date(schedule.start);
-              const scheduleEnd = new Date(schedule.end);
-              
-              // BOT 이름이 일치하고 시간이 겹치는지 확인 (botName 사용)
-              const botMatch = event.bot === schedule.botName || 
-                              event.bot === schedule.botId ||
-                              event.subject?.includes(schedule.botName) ||
-                              event.subject?.includes(schedule.botId) ||
-                              event.subject === schedule.subject;
-              
-              // 시간이 정확히 일치하거나 겹치는지 확인 (5분 이내 차이는 동일한 것으로 간주)
-              const timeDiff = Math.abs(eventStart.getTime() - scheduleStart.getTime());
-              const timeOverlap = (eventStart <= scheduleEnd && eventEnd >= scheduleStart) || 
-                                 (timeDiff < 5 * 60 * 1000); // 5분 이내 차이
-              
-              return botMatch && timeOverlap;
-            });
-          }
-        } catch (queryError) {
-          console.warn(`⚠️ Power Automate 일정 조회 실패 (${schedule.botName}):`, queryError.message);
-          // 조회 실패 시 "없다"로 간주하고 등록하면, 동기화마다 중복 등록되는 문제가 생길 수 있음.
-          // 따라서 조회 실패 시에는 안전하게 "등록 생략" 처리한다.
-          existsInPowerAutomate = true;
-        }
-        
-        // 2-2: Power Automate에 일정이 없으면 등록
-        if (!existsInPowerAutomate) {
+        if (powerAutomateEnabled) {
+          let existsInPowerAutomate = false;
           try {
-            // Power Automate API 형식으로 변환
-            // botName을 bot 필드에 매핑 (응답의 botName 값 사용)
-            const powerAutomateData = {
-              bot: schedule.botName, // botName을 bot 필드에 매핑
-              subject: schedule.subject,
-              start: {
-                dateTime: schedule.start,
-                timeZone: 'Asia/Seoul'
-              },
-              end: {
-                dateTime: schedule.end,
-                timeZone: 'Asia/Seoul'
-              },
-              body: schedule.body || `프로세스: ${schedule.processName || ''}`
-            };
-            
-            await powerAutomateService.createSchedule(powerAutomateData);
-            registeredCount++;
-            console.log(`✅ 일정 등록: ${schedule.botName} - ${schedule.subject}`);
-          } catch (registerError) {
-            console.warn(`⚠️ Power Automate 일정 등록 실패 (${schedule.botName}):`, registerError.message);
-            // 등록 실패해도 DB에는 저장
+            // 조회 범위를 넓혀서 중복 체크 (시작 시간 ±1시간)
+            const queryStart = new Date(schedule.start);
+            queryStart.setHours(queryStart.getHours() - 1);
+            const queryEnd = new Date(schedule.end);
+            queryEnd.setHours(queryEnd.getHours() + 1);
+
+            const queryResult = await powerAutomateService.querySchedules(
+              queryStart.toISOString(),
+              queryEnd.toISOString()
+            );
+
+            if (queryResult.events && Array.isArray(queryResult.events)) {
+              existsInPowerAutomate = queryResult.events.some(event => {
+                const eventStart = new Date(event.start?.dateTime || event.start);
+                const eventEnd = new Date(event.end?.dateTime || event.end);
+                const scheduleStart = new Date(schedule.start);
+                const scheduleEnd = new Date(schedule.end);
+
+                const botMatch =
+                  event.bot === schedule.botName ||
+                  event.bot === schedule.botId ||
+                  event.subject?.includes(schedule.botName) ||
+                  event.subject?.includes(schedule.botId) ||
+                  event.subject === schedule.subject;
+
+                const timeDiff = Math.abs(eventStart.getTime() - scheduleStart.getTime());
+                const timeOverlap =
+                  (eventStart <= scheduleEnd && eventEnd >= scheduleStart) ||
+                  (timeDiff < 5 * 60 * 1000);
+
+                return botMatch && timeOverlap;
+              });
+            }
+          } catch (queryError) {
+            console.warn(`⚠️ Power Automate 일정 조회 실패 (${schedule.botName}):`, queryError.message);
+            // 조회 실패 시 등록하면 중복이 생길 수 있어 안전하게 등록 생략
+            existsInPowerAutomate = true;
+          }
+
+          if (!existsInPowerAutomate) {
+            try {
+              const powerAutomateData = {
+                bot: schedule.botName,
+                subject: schedule.subject,
+                start: { dateTime: schedule.start, timeZone: 'Asia/Seoul' },
+                end: { dateTime: schedule.end, timeZone: 'Asia/Seoul' },
+                body: schedule.body || `프로세스: ${schedule.processName || ''}`
+              };
+
+              await powerAutomateService.createSchedule(powerAutomateData);
+              registeredCount++;
+              console.log(`✅ Power Automate 일정 등록: ${schedule.botName} - ${schedule.subject}`);
+            } catch (registerError) {
+              console.warn(`⚠️ Power Automate 일정 등록 실패 (${schedule.botName}):`, registerError.message);
+            }
           }
         } else {
-          skippedCount++;
-          console.log(`⏭️ 일정 건너뜀 (이미 존재): ${schedule.botName} - ${schedule.subject}`);
+          // 설정이 없으면 PA 조회/등록 자체를 수행하지 않음(명확히)
+          // - "안되는 것처럼 보임"을 방지하기 위해 로그로 남김
+          // - DB 저장은 정상 진행
+          console.log('ℹ️ Power Automate 미사용: POWER_AUTOMATE_QUERY_URL/CREATE_URL 미설정');
         }
         
         // 3단계: DB에 저장 또는 업데이트 (중복이면 저장 스킵)
@@ -289,6 +281,16 @@ router.post('/rpa-schedules', async (req, res) => {
     } catch (logError) {
       console.error('동기화 로그 기록 실패:', logError.message);
     }
+
+    // ✅ 캐시 무효화: 동기화 후에도 캘린더가 "이전 캐시"를 보는 문제 방지
+    try {
+      const keys = await redis.keys('schedules:*');
+      if (keys.length > 0) {
+        await redis.del(keys);
+      }
+    } catch (cacheError) {
+      console.warn('캐시 무효화 실패(계속 진행):', cacheError.message);
+    }
     
     // 캐시 무효화
     try {
@@ -315,7 +317,8 @@ router.post('/rpa-schedules', async (req, res) => {
       recordsRegistered: registeredCount,
       recordsSkipped: skippedCount,
       recordsFailed: errorCount,
-      totalRecords: schedules.length
+      totalRecords: schedules.length,
+      powerAutomateEnabled
     });
   } catch (error) {
     console.error('동기화 오류:', error);
