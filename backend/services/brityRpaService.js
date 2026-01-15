@@ -139,17 +139,19 @@ class BrityRpaService {
         apiUrl = apiUrl.replace(/\/$/, '') + '/scheduler/api/v1';
       }
       // ✅ 운영 환경에 따라 미래 일정(캘린더 표시용)은 /schedulings/calendar/list 가 필요한 경우가 있음
-      // default: /schedulings/calendar/list
-      // override: BRITY_SCHEDULINGS_PATH=/schedulings/list
-      const schedulingsPath = process.env.BRITY_SCHEDULINGS_PATH || '/schedulings/calendar/list';
-      const normalizedPath = schedulingsPath.startsWith('/') ? schedulingsPath : `/${schedulingsPath}`;
-      const endpoint = `${apiUrl}${normalizedPath}`;
+      // 다만 calendar/list 는 환경/권한/버전에 따라 요청 파라미터 포맷이 달라 400(INVALID_INPUT)이 날 수 있어,
+      // 기본은 calendar/list를 시도하되 실패 시 /schedulings/list 로 자동 폴백합니다.
+      const preferredPath = process.env.BRITY_SCHEDULINGS_PATH || '/schedulings/calendar/list';
+      const normalizedPreferredPath = preferredPath.startsWith('/') ? preferredPath : `/${preferredPath}`;
+      const preferredEndpoint = `${apiUrl}${normalizedPreferredPath}`;
+      const fallbackEndpoint = `${apiUrl}/schedulings/list`;
+      const enableFallback = String(process.env.BRITY_SCHEDULINGS_FALLBACK || 'true').toLowerCase() === 'true';
       
       if (!process.env.BRITY_RPA_TOKEN) {
         throw new Error('BRITY_RPA_TOKEN이 설정되어 있지 않습니다. backend/.env에 BRITY_RPA_TOKEN을 설정해주세요.');
       }
 
-      console.log(`📡 Brity RPA 등록/캘린더 스케줄 API 호출: ${endpoint}`);
+      console.log(`📡 Brity RPA 등록/캘린더 스케줄 API 호출: ${preferredEndpoint}`);
       console.log(`📅 기간: ${startDate} ~ ${endDate}`);
       
       // schedulings/list 는 보통 "YYYY-MM-DD HH:mm" 형태를 기대 (명세/샘플 기준)
@@ -170,90 +172,93 @@ class BrityRpaService {
       
       console.log(`📤 요청 본문:`, JSON.stringify(requestBody, null, 2));
       
-      const response = await axios.post(
-        endpoint,
-        requestBody,
-        {
+      const fetchAll = async (endpointToUse) => {
+        const response = await axios.post(endpointToUse, requestBody, {
           headers: {
             'Authorization': process.env.BRITY_RPA_TOKEN,
             'Content-Type': 'application/json'
           },
           timeout: 30000
-        }
-      );
+        });
 
-      const rawList = response.data.list || [];
-      const totalCount = response.data.totalCount || rawList.length || 0;
-      const listCount = response.data.listCount || rawList.length || 0;
+        const rawList = response.data.list || [];
+        const totalCount = response.data.totalCount || rawList.length || 0;
+        const listCount = response.data.listCount || rawList.length || 0;
 
-      console.log(`✅ API 응답 수신: totalCount=${totalCount}, listCount=${listCount}, list.length=${rawList.length}`);
+        console.log(`✅ API 응답 수신: totalCount=${totalCount}, listCount=${listCount}, list.length=${rawList.length}`);
 
-      // 모든 데이터를 수집할 배열
-      let allSchedules = [...rawList];
-      let currentOffset = offset + listCount;
+        let allSchedules = [...rawList];
+        let currentOffset = offset + listCount;
 
-      // totalCount가 현재까지 가져온 데이터보다 크면 추가 조회 필요
-      if (totalCount > allSchedules.length) {
-        console.log(`📥 Pagination 필요: 현재=${allSchedules.length}개, 전체=${totalCount}개, 남은 건수=${totalCount - allSchedules.length}`);
-        
-        // limit이 100 미만이고 totalCount가 limit보다 크면 100으로 증가하여 재조회 (더 효율적)
-        if (limit < 100 && totalCount > limit) {
-          const newLimit = 100;
-          console.log(`📥 limit 증가하여 재조회: limit=${limit} → ${newLimit}`);
-          return await this.getSchedules(startDate, endDate, 0, newLimit);
-        }
-        
-        // limit이 100이거나 이미 최대인 경우, offset 기반 pagination
-        // 모든 데이터를 가져올 때까지 반복
-        const maxLimit = limit >= 100 ? 100 : limit;
-        while (allSchedules.length < totalCount) {
-          const nextOffset = currentOffset;
-          console.log(`📥 추가 데이터 조회: offset=${nextOffset}, 현재까지=${allSchedules.length}개, 전체=${totalCount}개, 남은 건수=${totalCount - nextOffset}`);
-          
-          // 다음 배치 조회
-          const nextRequestBody = {
-            offset: nextOffset,
-            limit: maxLimit, // 최대 100
-            orderBy: 'regTimeselectScheduleJobListForDisplay desc',
-            parameter: {
-              START_DATETIME: `${startDate} 00:00`,
-              END_DATETIME: `${endDate} 23:59`
-            }
-          };
-          
-          const nextResponse = await axios.post(
-            endpoint,
-            nextRequestBody,
-            {
+        if (totalCount > allSchedules.length) {
+          console.log(`📥 Pagination 필요: 현재=${allSchedules.length}개, 전체=${totalCount}개, 남은 건수=${totalCount - allSchedules.length}`);
+
+          if (limit < 100 && totalCount > limit) {
+            const newLimit = 100;
+            console.log(`📥 limit 증가하여 재조회: limit=${limit} → ${newLimit}`);
+            // limit만 올려 동일 endpoint로 다시 호출
+            return await this.getSchedules(startDate, endDate, 0, newLimit);
+          }
+
+          const maxLimit = limit >= 100 ? 100 : limit;
+          while (allSchedules.length < totalCount) {
+            const nextOffset = currentOffset;
+            console.log(`📥 추가 데이터 조회: offset=${nextOffset}, 현재까지=${allSchedules.length}개, 전체=${totalCount}개, 남은 건수=${totalCount - nextOffset}`);
+
+            const nextRequestBody = {
+              offset: nextOffset,
+              limit: maxLimit,
+              orderBy: requestBody.orderBy,
+              parameter: requestBody.parameter
+            };
+
+            const nextResponse = await axios.post(endpointToUse, nextRequestBody, {
               headers: {
                 'Authorization': process.env.BRITY_RPA_TOKEN,
                 'Content-Type': 'application/json'
               },
               timeout: 30000
+            });
+
+            const nextList = nextResponse.data.list || [];
+            const nextListCount = nextResponse.data.listCount || nextList.length;
+
+            if (nextList.length === 0) {
+              console.log(`⚠️ 더 이상 데이터가 없습니다.`);
+              break;
             }
-          );
-          
-          const nextList = nextResponse.data.list || [];
-          const nextListCount = nextResponse.data.listCount || nextList.length;
-          
-          if (nextList.length === 0) {
-            console.log(`⚠️ 더 이상 데이터가 없습니다.`);
-            break;
+
+            allSchedules.push(...nextList);
+            currentOffset = allSchedules.length;
+
+            console.log(`📥 조회 완료: 이번 배치=${nextList.length}개, 누적=${allSchedules.length}개 / ${totalCount}개`);
+
+            if (allSchedules.length >= totalCount || nextListCount < maxLimit) break;
           }
-          
-          allSchedules.push(...nextList);
-          currentOffset = allSchedules.length; // 실제 수집된 데이터 수로 업데이트
-          
-          console.log(`📥 조회 완료: 이번 배치=${nextList.length}개, 누적=${allSchedules.length}개 / ${totalCount}개`);
-          
-          // 더 이상 가져올 데이터가 없으면 종료
-          if (nextList.length === 0 || allSchedules.length >= totalCount || nextListCount < maxLimit) {
-            break;
-          }
+        }
+
+        return allSchedules;
+      };
+
+      let allSchedules;
+      try {
+        allSchedules = await fetchAll(preferredEndpoint);
+      } catch (err) {
+        const status = err?.response?.status;
+        const errData = err?.response?.data;
+        const invalidInput =
+          status === 400 &&
+          (errData?.errorValue === 'INVALID_INPUT' || errData?.errorCode === 'SCHEDULER_I1');
+
+        if (enableFallback && preferredEndpoint.endsWith('/schedulings/calendar/list') && invalidInput) {
+          console.warn(`⚠️ calendar/list INVALID_INPUT → /schedulings/list 로 폴백합니다.`);
+          allSchedules = await fetchAll(fallbackEndpoint);
+        } else {
+          throw err;
         }
       }
       
-      console.log(`📊 전체 데이터 수집 완료: ${allSchedules.length}개 / ${totalCount}개`);
+      console.log(`📊 전체 데이터 수집 완료: ${allSchedules.length}개`);
 
       // 등록 스케줄 데이터 정규화
       const normalizedSchedules = [];
