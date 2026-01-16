@@ -22,8 +22,9 @@ const AUTO_REGISTER_TO_POWER_AUTOMATE = process.env.AUTO_REGISTER_TO_POWER_AUTOM
 // ✅ 요구사항: "Power Automate 조회가 200이 아니면 일정 등록(create)을 해야 함"
 const PA_CREATE_ON_QUERY_ERROR =
   String(process.env.PA_CREATE_ON_QUERY_ERROR || 'true').toLowerCase() === 'true';
-// ✅ 안전장치: 자동 동기화에서 PA create 폭주 방지
-const PA_MAX_CREATES_PER_RUN = Math.max(0, parseInt(process.env.PA_MAX_CREATES_PER_RUN || '200', 10) || 200);
+// ✅ 안전장치(선택): 자동 동기화에서 PA create 폭주 방지 상한
+// - 기본값 0(무제한). 필요 시 env로 제한: PA_MAX_CREATES_PER_RUN=200
+const PA_MAX_CREATES_PER_RUN = Math.max(0, parseInt(process.env.PA_MAX_CREATES_PER_RUN || '0', 10) || 0);
 const PA_SYNC_TAG = String(process.env.PA_SYNC_TAG || 'RPA_SCHED_MANAGER');
 const PA_REFRESH_ON_DIFF = String(process.env.PA_REFRESH_ON_DIFF || 'true').toLowerCase() === 'true';
 const PA_MAX_REFRESH_CALLS = Math.max(0, parseInt(process.env.PA_MAX_REFRESH_CALLS || '10', 10) || 10);

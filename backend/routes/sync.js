@@ -286,10 +286,9 @@ router.post('/rpa-schedules', async (req, res) => {
       String(process.env.PA_REFRESH_ON_DIFF || 'true').toLowerCase() === 'true';
     const paMaxRefreshCalls = Math.max(0, parseInt(process.env.PA_MAX_REFRESH_CALLS || '10', 10) || 10);
 
-    // ✅ 안전장치: PA 등록(create) 폭주 방지
-    // - query 실패 시 createOnQueryError=true 이면 대량 생성 위험이 있으므로 상한을 둡니다.
-    // - 기본값 200 (필요 시 env로 조절)
-    const paMaxCreatesPerRun = Math.max(0, parseInt(process.env.PA_MAX_CREATES_PER_RUN || '200', 10) || 200);
+    // ✅ 안전장치(선택): PA 등록(create) 폭주 방지 상한
+    // - 기본값 0(무제한). 필요 시 env로 제한: PA_MAX_CREATES_PER_RUN=200
+    const paMaxCreatesPerRun = Math.max(0, parseInt(process.env.PA_MAX_CREATES_PER_RUN || '0', 10) || 0);
     const paSyncTag = String(process.env.PA_SYNC_TAG || 'RPA_SCHED_MANAGER');
 
     // (옵션) DB 저장 row 수 절감을 위한 시간 버킷 그룹핑
