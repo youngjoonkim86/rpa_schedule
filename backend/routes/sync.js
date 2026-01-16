@@ -26,6 +26,10 @@ const currentSync = {
     failed: 0,
     paRegistered: 0,
     paSkipped: 0,
+    // ✅ PA 스킵 사유 분해(디버깅용)
+    paSkippedByRegistrationTable: 0, // pa_registrations에 REGISTERED
+    paSkippedByExistsInPa: 0,        // query로 "이미 존재" 판정
+    paCreateAttempted: 0,            // create 호출 시도 횟수
     paQueryErrors: 0,
     paCreateErrors: 0,
     paRefreshCalls: 0,
@@ -237,6 +241,9 @@ router.post('/rpa-schedules', async (req, res) => {
       failed: 0,
       paRegistered: 0,
       paSkipped: 0,
+      paSkippedByRegistrationTable: 0,
+      paSkippedByExistsInPa: 0,
+      paCreateAttempted: 0,
       paQueryErrors: 0,
       paCreateErrors: 0,
       paRefreshCalls: 0,
@@ -393,6 +400,10 @@ router.post('/rpa-schedules', async (req, res) => {
     // - pa_registrations가 REGISTERED인 경우는 계속 스킵(중복 방지)
     const paDisableExistenceCheck =
       String(process.env.PA_DISABLE_EXISTENCE_CHECK || 'false').toLowerCase() === 'true';
+    // ✅ 강제 옵션(디버그): pa_registrations(등록상태 테이블) 스킵을 무시하고 create를 시도
+    // - 중복 생성 위험이 있으니 짧은 기간(1일) 테스트에만 사용 권장
+    const paIgnoreRegistrationTable =
+      String(process.env.PA_IGNORE_REGISTRATION_TABLE || 'false').toLowerCase() === 'true';
 
     // (옵션) DB 저장 row 수 절감을 위한 시간 버킷 그룹핑
     // ✅ PA는 원본(정확한 시간)으로 처리, DB는 버킷으로 묶어서 저장
@@ -537,16 +548,19 @@ router.post('/rpa-schedules', async (req, res) => {
         try {
           // ✅ PA 등록 상태(별도 테이블) 기준으로 중복 방지/재시도
           const botKey = schedule.botName || schedule.botId || '';
-          const alreadyRegistered = await PowerAutomateRegistration.isRegistered({
-            botId: botKey,
-            subject: schedule.subject,
-            startIso: schedule.start,
-            endIso: schedule.end
-          });
-          if (alreadyRegistered) {
-            skippedCount++;
-            currentSync.progress.paSkipped += 1;
-            continue;
+          if (!paIgnoreRegistrationTable) {
+            const alreadyRegistered = await PowerAutomateRegistration.isRegistered({
+              botId: botKey,
+              subject: schedule.subject,
+              startIso: schedule.start,
+              endIso: schedule.end
+            });
+            if (alreadyRegistered) {
+              skippedCount++;
+              currentSync.progress.paSkipped += 1;
+              currentSync.progress.paSkippedByRegistrationTable += 1;
+              continue;
+            }
           }
 
           let existsInPowerAutomate = false;
@@ -591,6 +605,7 @@ router.post('/rpa-schedules', async (req, res) => {
                   startIso: schedule.start,
                   endIso: schedule.end
                 });
+                currentSync.progress.paSkippedByExistsInPa += 1;
               }
             } catch (queryError) {
               powerAutomateQueryErrors += 1;
@@ -636,6 +651,7 @@ router.post('/rpa-schedules', async (req, res) => {
               body: `[syncTag=${paSyncTag}]\n${schedule.body || `프로세스: ${schedule.processName || ''}`}`
             };
             try {
+              currentSync.progress.paCreateAttempted += 1;
               await powerAutomateService.createScheduleThrottled(powerAutomateData);
               registeredCount++;
               paCreatesThisRun += 1;
@@ -786,6 +802,9 @@ router.post('/rpa-schedules', async (req, res) => {
       paAvailable: { query: powerAutomateQueryAvailable, create: powerAutomateCreateAvailable },
       paRegistered: currentSync.progress.paRegistered,
       paSkipped: currentSync.progress.paSkipped,
+      paSkippedByRegistrationTable: currentSync.progress.paSkippedByRegistrationTable,
+      paSkippedByExistsInPa: currentSync.progress.paSkippedByExistsInPa,
+      paCreateAttempted: currentSync.progress.paCreateAttempted,
       paQueryErrors: currentSync.progress.paQueryErrors,
       paCreateErrors: currentSync.progress.paCreateErrors,
       paRefreshCalls: currentSync.progress.paRefreshCalls,

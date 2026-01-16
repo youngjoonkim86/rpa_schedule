@@ -144,6 +144,9 @@ if (brityRpaService && Schedule && db) {
     let errorCount = 0;
     let registeredCount = 0;
     let skippedCount = 0;
+    let skippedByRegistrationTable = 0;
+    let skippedByExistsInPa = 0;
+    let createAttempted = 0;
     const powerAutomateEnabled =
       !!process.env.POWER_AUTOMATE_QUERY_URL && !!process.env.POWER_AUTOMATE_CREATE_URL;
     let powerAutomateQueryAvailable = AUTO_REGISTER_TO_POWER_AUTOMATE && powerAutomateService && powerAutomateEnabled;
@@ -225,15 +228,20 @@ if (brityRpaService && Schedule && db) {
       for (const schedule of schedulesForPa) {
         try {
           const botKey = schedule.botName || schedule.botId || '';
-          const alreadyRegistered = await PowerAutomateRegistration.isRegistered({
-            botId: botKey,
-            subject: schedule.subject,
-            startIso: schedule.start,
-            endIso: schedule.end
-          });
-          if (alreadyRegistered) {
-            skippedCount++;
-            continue;
+          const paIgnoreRegistrationTable =
+            String(process.env.PA_IGNORE_REGISTRATION_TABLE || 'false').toLowerCase() === 'true';
+          if (!paIgnoreRegistrationTable) {
+            const alreadyRegistered = await PowerAutomateRegistration.isRegistered({
+              botId: botKey,
+              subject: schedule.subject,
+              startIso: schedule.start,
+              endIso: schedule.end
+            });
+            if (alreadyRegistered) {
+              skippedCount++;
+              skippedByRegistrationTable++;
+              continue;
+            }
           }
 
           let existsInPowerAutomate = false;
@@ -274,6 +282,7 @@ if (brityRpaService && Schedule && db) {
                   startIso: schedule.start,
                   endIso: schedule.end
                 });
+                skippedByExistsInPa++;
               }
             } catch (queryError) {
               const status = queryError?.status || queryError?.response?.status;
@@ -309,6 +318,7 @@ if (brityRpaService && Schedule && db) {
               body: `[syncTag=${PA_SYNC_TAG}]\n${schedule.body || `프로세스: ${schedule.processName || ''}`}`
             };
             try {
+              createAttempted++;
               await powerAutomateService.createScheduleThrottled(powerAutomateData);
               registeredCount++;
               paCreatesThisRun += 1;
@@ -402,7 +412,10 @@ if (brityRpaService && Schedule && db) {
           failed: errorCount,
           paEnabled: AUTO_REGISTER_TO_POWER_AUTOMATE && powerAutomateEnabled,
           paRegistered: registeredCount,
-          paSkipped: skippedCount
+          paSkipped: skippedCount,
+          paSkippedByRegistrationTable: skippedByRegistrationTable,
+          paSkippedByExistsInPa: skippedByExistsInPa,
+          paCreateAttempted: createAttempted
         }
       };
       await db.execute(
