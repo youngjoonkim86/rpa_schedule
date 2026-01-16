@@ -26,6 +26,7 @@ const currentSync = {
     paRegistered: 0,
     paSkipped: 0,
     paQueryErrors: 0,
+    paCreateErrors: 0,
     paDisabledReason: null,
   }
 };
@@ -170,6 +171,7 @@ router.post('/rpa-schedules', async (req, res) => {
       paRegistered: 0,
       paSkipped: 0,
       paQueryErrors: 0,
+      paCreateErrors: 0,
       paDisabledReason: null,
     };
 
@@ -264,6 +266,11 @@ router.post('/rpa-schedules', async (req, res) => {
     const powerAutomateEnabled =
       !!process.env.POWER_AUTOMATE_QUERY_URL && !!process.env.POWER_AUTOMATE_CREATE_URL;
 
+    // ✅ 요구사항: "Power Automate 조회가 200이 아니면 일정 등록(create)을 해야 함"
+    // - 기본값 true (필요 시 env로 끌 수 있음)
+    const createOnQueryError =
+      String(process.env.PA_CREATE_ON_QUERY_ERROR || 'true').toLowerCase() === 'true';
+
     // (옵션) DB 저장 row 수 절감을 위한 시간 버킷 그룹핑
     // ✅ PA는 원본(정확한 시간)으로 처리, DB는 버킷으로 묶어서 저장
     const bucketMinutesRaw = parseInt(process.env.BRITY_GROUP_BUCKET_MINUTES || '0', 10);
@@ -292,66 +299,93 @@ router.post('/rpa-schedules', async (req, res) => {
     let skippedCount = 0;
 
     // PA가 502 등으로 불안정할 때 동기화가 "끝없이 느려지고 타임아웃" 나는 걸 방지
-    // - 첫 번째 치명적 실패를 감지하면 해당 run에서는 PA 조회/등록을 즉시 중단
-    let powerAutomateAvailable = powerAutomateEnabled;
+    // - query 실패 시: query만 중단하고(서킷브레이커), create는 계속 시도할 수 있음(요구사항)
+    // - create 실패 시: create도 중단
+    let powerAutomateQueryAvailable = powerAutomateEnabled;
+    let powerAutomateCreateAvailable = powerAutomateEnabled;
     let powerAutomateDisabledReason = null;
     let powerAutomateQueryErrors = 0;
     
     // 2단계: Power Automate 처리(원본 기준)
-    if (powerAutomateAvailable && powerAutomateService && powerAutomateEnabled) {
+    if ((powerAutomateQueryAvailable || powerAutomateCreateAvailable) && powerAutomateService && powerAutomateEnabled) {
       console.log(`🔗 Power Automate 연동: enabled=true, query=${!!process.env.POWER_AUTOMATE_QUERY_URL}, create=${!!process.env.POWER_AUTOMATE_CREATE_URL}`);
       for (const schedule of schedulesForPa) {
         try {
-          let existsInPowerAutomate = false;
-          try {
-            const queryStart = new Date(schedule.start);
-            queryStart.setHours(queryStart.getHours() - 1);
-            const queryEnd = new Date(schedule.end);
-            queryEnd.setHours(queryEnd.getHours() + 1);
-
-            const queryResult = await powerAutomateService.querySchedules(
-              queryStart.toISOString(),
-              queryEnd.toISOString()
-            );
-
-            if (queryResult.events && Array.isArray(queryResult.events)) {
-              existsInPowerAutomate = queryResult.events.some(event => {
-                const eventStart = new Date(event.start?.dateTime || event.start);
-                const eventEnd = new Date(event.end?.dateTime || event.end);
-                const scheduleStart = new Date(schedule.start);
-                const scheduleEnd = new Date(schedule.end);
-
-                const botMatch =
-                  event.bot === schedule.botName ||
-                  event.bot === schedule.botId ||
-                  event.subject?.includes(schedule.botName) ||
-                  event.subject?.includes(schedule.botId) ||
-                  event.subject === schedule.subject;
-
-                const timeDiff = Math.abs(eventStart.getTime() - scheduleStart.getTime());
-                const timeOverlap =
-                  (eventStart <= scheduleEnd && eventEnd >= scheduleStart) ||
-                  (timeDiff < 5 * 60 * 1000);
-
-                return botMatch && timeOverlap;
-              });
-            }
-          } catch (queryError) {
-            powerAutomateQueryErrors += 1;
-            currentSync.progress.paQueryErrors += 1;
-            const status = queryError?.status || queryError?.response?.status;
-            // 조회 실패 시 등록하면 중복이 생길 수 있어 안전하게 등록 생략
-            existsInPowerAutomate = true;
-            if (!powerAutomateDisabledReason && (status === 502 || status === 503 || status === 504 || queryError.code === 'ETIMEDOUT')) {
-              powerAutomateAvailable = false;
-              powerAutomateDisabledReason = `Power Automate query failed (${status || queryError.code || 'unknown'})`;
-              currentSync.progress.paDisabledReason = powerAutomateDisabledReason;
-            }
+          // ✅ DB에 이미 있으면(동기화 완료/기등록) PA 중복 등록 방지: query/create 모두 스킵
+          const botIdForDb = schedule.botId || schedule.botName;
+          const existsInDbForPa = await Schedule.existsExactActive({
+            botId: botIdForDb,
+            subject: schedule.subject,
+            startIso: schedule.start,
+            endIso: schedule.end
+          });
+          if (existsInDbForPa) {
+            skippedCount++;
+            currentSync.progress.paSkipped += 1;
+            continue;
           }
 
-          if (!powerAutomateAvailable) break;
+          let existsInPowerAutomate = false;
+          // 1) query가 가능하면 먼저 조회
+          if (powerAutomateQueryAvailable) {
+            try {
+              const queryStart = new Date(schedule.start);
+              queryStart.setHours(queryStart.getHours() - 1);
+              const queryEnd = new Date(schedule.end);
+              queryEnd.setHours(queryEnd.getHours() + 1);
+
+              const queryResult = await powerAutomateService.querySchedules(
+                queryStart.toISOString(),
+                queryEnd.toISOString()
+              );
+
+              if (queryResult.events && Array.isArray(queryResult.events)) {
+                existsInPowerAutomate = queryResult.events.some(event => {
+                  const eventStart = new Date(event.start?.dateTime || event.start);
+                  const eventEnd = new Date(event.end?.dateTime || event.end);
+                  const scheduleStart = new Date(schedule.start);
+                  const scheduleEnd = new Date(schedule.end);
+
+                  const botMatch =
+                    event.bot === schedule.botName ||
+                    event.bot === schedule.botId ||
+                    event.subject?.includes(schedule.botName) ||
+                    event.subject?.includes(schedule.botId) ||
+                    event.subject === schedule.subject;
+
+                  const timeDiff = Math.abs(eventStart.getTime() - scheduleStart.getTime());
+                  const timeOverlap =
+                    (eventStart <= scheduleEnd && eventEnd >= scheduleStart) ||
+                    (timeDiff < 5 * 60 * 1000);
+
+                  return botMatch && timeOverlap;
+                });
+              }
+            } catch (queryError) {
+              powerAutomateQueryErrors += 1;
+              currentSync.progress.paQueryErrors += 1;
+              const status = queryError?.status || queryError?.response?.status;
+
+              // ✅ 요구사항: 조회가 실패(200 아님)하면 등록(create)을 시도
+              existsInPowerAutomate = createOnQueryError ? false : true;
+
+              // query 서킷브레이커(해당 run 동안만)
+              if (!powerAutomateDisabledReason && (status === 502 || status === 503 || status === 504 || queryError.code === 'ETIMEDOUT')) {
+                powerAutomateQueryAvailable = false;
+                powerAutomateDisabledReason = `Power Automate query failed (${status || queryError.code || 'unknown'})`;
+                currentSync.progress.paDisabledReason = powerAutomateDisabledReason;
+              }
+            }
+          } else {
+            // query가 이미 중단된 상태면, 설정에 따라 create를 시도하거나 스킵
+            existsInPowerAutomate = createOnQueryError ? false : true;
+          }
 
           if (!existsInPowerAutomate) {
+            if (!powerAutomateCreateAvailable) {
+              // create도 중단 상태면 더 진행해도 의미 없음
+              break;
+            }
             const powerAutomateData = {
               bot: schedule.botName,
               subject: schedule.subject,
@@ -359,9 +393,19 @@ router.post('/rpa-schedules', async (req, res) => {
               end: { dateTime: schedule.end, timeZone: 'Asia/Seoul' },
               body: schedule.body || `프로세스: ${schedule.processName || ''}`
             };
-            await powerAutomateService.createSchedule(powerAutomateData);
-            registeredCount++;
-            currentSync.progress.paRegistered += 1;
+            try {
+              await powerAutomateService.createSchedule(powerAutomateData);
+              registeredCount++;
+              currentSync.progress.paRegistered += 1;
+            } catch (createError) {
+              currentSync.progress.paCreateErrors += 1;
+              const status = createError?.status || createError?.response?.status;
+              if (!powerAutomateDisabledReason && (status === 502 || status === 503 || status === 504 || createError.code === 'ETIMEDOUT')) {
+                powerAutomateCreateAvailable = false;
+                powerAutomateDisabledReason = `Power Automate create failed (${status || createError.code || 'unknown'})`;
+                currentSync.progress.paDisabledReason = powerAutomateDisabledReason;
+              }
+            }
           } else {
             skippedCount++;
             currentSync.progress.paSkipped += 1;
@@ -469,10 +513,11 @@ router.post('/rpa-schedules', async (req, res) => {
       dbSkipped: currentSync.progress.dbSkipped,
       failed: errorCount,
       paEnabled: powerAutomateEnabled,
-      paAvailable: powerAutomateAvailable,
+      paAvailable: { query: powerAutomateQueryAvailable, create: powerAutomateCreateAvailable },
       paRegistered: currentSync.progress.paRegistered,
       paSkipped: currentSync.progress.paSkipped,
       paQueryErrors: currentSync.progress.paQueryErrors,
+      paCreateErrors: currentSync.progress.paCreateErrors,
       paDisabledReason: currentSync.progress.paDisabledReason,
       brity: brityDebug
     };

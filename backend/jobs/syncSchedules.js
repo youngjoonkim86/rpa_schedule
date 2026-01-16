@@ -17,6 +17,9 @@ try {
 
 // Power Automate 자동 등록 여부 (환경 변수로 제어)
 const AUTO_REGISTER_TO_POWER_AUTOMATE = process.env.AUTO_REGISTER_TO_POWER_AUTOMATE === 'true';
+// ✅ 요구사항: "Power Automate 조회가 200이 아니면 일정 등록(create)을 해야 함"
+const PA_CREATE_ON_QUERY_ERROR =
+  String(process.env.PA_CREATE_ON_QUERY_ERROR || 'true').toLowerCase() === 'true';
 
 /**
  * 매시간 정각에 Brity RPA 스케줄 동기화
@@ -99,58 +102,77 @@ if (brityRpaService && Schedule && db) {
     let skippedCount = 0;
     const powerAutomateEnabled =
       !!process.env.POWER_AUTOMATE_QUERY_URL && !!process.env.POWER_AUTOMATE_CREATE_URL;
-    let powerAutomateAvailable = AUTO_REGISTER_TO_POWER_AUTOMATE && powerAutomateService && powerAutomateEnabled;
+    let powerAutomateQueryAvailable = AUTO_REGISTER_TO_POWER_AUTOMATE && powerAutomateService && powerAutomateEnabled;
+    let powerAutomateCreateAvailable = AUTO_REGISTER_TO_POWER_AUTOMATE && powerAutomateService && powerAutomateEnabled;
 
     // 2단계: Power Automate 처리(원본 기준)
-    if (powerAutomateAvailable) {
+    if (powerAutomateQueryAvailable || powerAutomateCreateAvailable) {
       for (const schedule of schedulesForPa) {
         try {
-          let existsInPowerAutomate = false;
-          try {
-            const queryStart = new Date(schedule.start);
-            queryStart.setHours(queryStart.getHours() - 1);
-            const queryEnd = new Date(schedule.end);
-            queryEnd.setHours(queryEnd.getHours() + 1);
-
-            const queryResult = await powerAutomateService.querySchedules(
-              queryStart.toISOString(),
-              queryEnd.toISOString()
-            );
-
-            if (queryResult.events && Array.isArray(queryResult.events)) {
-              existsInPowerAutomate = queryResult.events.some(event => {
-                const eventStart = new Date(event.start?.dateTime || event.start);
-                const eventEnd = new Date(event.end?.dateTime || event.end);
-                const scheduleStart = new Date(schedule.start);
-                const scheduleEnd = new Date(schedule.end);
-
-                const botMatch =
-                  event.bot === schedule.botName ||
-                  event.bot === schedule.botId ||
-                  event.subject?.includes(schedule.botName) ||
-                  event.subject?.includes(schedule.botId) ||
-                  event.subject === schedule.subject;
-
-                const timeDiff = Math.abs(eventStart.getTime() - scheduleStart.getTime());
-                const timeOverlap =
-                  (eventStart <= scheduleEnd && eventEnd >= scheduleStart) ||
-                  (timeDiff < 5 * 60 * 1000);
-
-                return botMatch && timeOverlap;
-              });
-            }
-          } catch (queryError) {
-            existsInPowerAutomate = true;
-            const status = queryError?.status || queryError?.response?.status;
-            if (status === 502 || status === 503 || status === 504 || queryError.code === 'ETIMEDOUT') {
-              powerAutomateAvailable = false;
-              console.warn(`🛑 Power Automate 임시 중단(자동 동기화): query failed (${status || queryError.code || 'unknown'})`);
-            }
+          // ✅ DB에 이미 있으면 PA 중복 등록 방지
+          const botIdForDb = schedule.botId || schedule.botName;
+          const existsInDbForPa = await Schedule.existsExactActive({
+            botId: botIdForDb,
+            subject: schedule.subject,
+            startIso: schedule.start,
+            endIso: schedule.end
+          });
+          if (existsInDbForPa) {
+            skippedCount++;
+            continue;
           }
 
-          if (!powerAutomateAvailable) break;
+          let existsInPowerAutomate = false;
+          if (powerAutomateQueryAvailable) {
+            try {
+              const queryStart = new Date(schedule.start);
+              queryStart.setHours(queryStart.getHours() - 1);
+              const queryEnd = new Date(schedule.end);
+              queryEnd.setHours(queryEnd.getHours() + 1);
+
+              const queryResult = await powerAutomateService.querySchedules(
+                queryStart.toISOString(),
+                queryEnd.toISOString()
+              );
+
+              if (queryResult.events && Array.isArray(queryResult.events)) {
+                existsInPowerAutomate = queryResult.events.some(event => {
+                  const eventStart = new Date(event.start?.dateTime || event.start);
+                  const eventEnd = new Date(event.end?.dateTime || event.end);
+                  const scheduleStart = new Date(schedule.start);
+                  const scheduleEnd = new Date(schedule.end);
+
+                  const botMatch =
+                    event.bot === schedule.botName ||
+                    event.bot === schedule.botId ||
+                    event.subject?.includes(schedule.botName) ||
+                    event.subject?.includes(schedule.botId) ||
+                    event.subject === schedule.subject;
+
+                  const timeDiff = Math.abs(eventStart.getTime() - scheduleStart.getTime());
+                  const timeOverlap =
+                    (eventStart <= scheduleEnd && eventEnd >= scheduleStart) ||
+                    (timeDiff < 5 * 60 * 1000);
+
+                  return botMatch && timeOverlap;
+                });
+              }
+            } catch (queryError) {
+              const status = queryError?.status || queryError?.response?.status;
+              // ✅ 조회 실패 시 create 시도(요구사항)
+              existsInPowerAutomate = PA_CREATE_ON_QUERY_ERROR ? false : true;
+
+              if (status === 502 || status === 503 || status === 504 || queryError.code === 'ETIMEDOUT') {
+                powerAutomateQueryAvailable = false; // query만 중단
+                console.warn(`🛑 Power Automate query 중단(자동 동기화): failed (${status || queryError.code || 'unknown'})`);
+              }
+            }
+          } else {
+            existsInPowerAutomate = PA_CREATE_ON_QUERY_ERROR ? false : true;
+          }
 
           if (!existsInPowerAutomate) {
+            if (!powerAutomateCreateAvailable) break;
             const powerAutomateData = {
               bot: schedule.botName,
               subject: schedule.subject,
@@ -158,8 +180,16 @@ if (brityRpaService && Schedule && db) {
               end: { dateTime: schedule.end, timeZone: 'Asia/Seoul' },
               body: schedule.body || `프로세스: ${schedule.processName || ''}`
             };
-            await powerAutomateService.createSchedule(powerAutomateData);
-            registeredCount++;
+            try {
+              await powerAutomateService.createSchedule(powerAutomateData);
+              registeredCount++;
+            } catch (createError) {
+              const status = createError?.status || createError?.response?.status;
+              if (status === 502 || status === 503 || status === 504 || createError.code === 'ETIMEDOUT') {
+                powerAutomateCreateAvailable = false;
+                console.warn(`🛑 Power Automate create 중단(자동 동기화): failed (${status || createError.code || 'unknown'})`);
+              }
+            }
           } else {
             skippedCount++;
           }
