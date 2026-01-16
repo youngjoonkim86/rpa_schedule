@@ -278,6 +278,12 @@ router.post('/rpa-schedules', async (req, res) => {
     const createOnQueryError =
       String(process.env.PA_CREATE_ON_QUERY_ERROR || 'true').toLowerCase() === 'true';
 
+    // ✅ 안전장치: PA 등록(create) 폭주 방지
+    // - query 실패 시 createOnQueryError=true 이면 대량 생성 위험이 있으므로 상한을 둡니다.
+    // - 기본값 200 (필요 시 env로 조절)
+    const paMaxCreatesPerRun = Math.max(0, parseInt(process.env.PA_MAX_CREATES_PER_RUN || '200', 10) || 200);
+    const paSyncTag = String(process.env.PA_SYNC_TAG || 'RPA_SCHED_MANAGER');
+
     // (옵션) DB 저장 row 수 절감을 위한 시간 버킷 그룹핑
     // ✅ PA는 원본(정확한 시간)으로 처리, DB는 버킷으로 묶어서 저장
     const bucketMinutesRaw = parseInt(process.env.BRITY_GROUP_BUCKET_MINUTES || '0', 10);
@@ -323,6 +329,7 @@ router.post('/rpa-schedules', async (req, res) => {
     // 2단계: Power Automate 처리(원본 기준)
     if ((powerAutomateQueryAvailable || powerAutomateCreateAvailable) && powerAutomateService && powerAutomateEnabled) {
       console.log(`🔗 Power Automate 연동: enabled=true, query=${!!process.env.POWER_AUTOMATE_QUERY_URL}, create=${!!process.env.POWER_AUTOMATE_CREATE_URL}`);
+      let paCreatesThisRun = 0;
       for (const schedule of schedulesForPa) {
         try {
           // ✅ DB에 이미 있으면(동기화 완료/기등록) PA 중복 등록 방지: query/create 모두 스킵
@@ -400,16 +407,23 @@ router.post('/rpa-schedules', async (req, res) => {
               // create도 중단 상태면 더 진행해도 의미 없음
               break;
             }
+            if (paMaxCreatesPerRun > 0 && paCreatesThisRun >= paMaxCreatesPerRun) {
+              powerAutomateCreateAvailable = false;
+              powerAutomateDisabledReason = `Power Automate create capped (max ${paMaxCreatesPerRun}/run)`;
+              currentSync.progress.paDisabledReason = powerAutomateDisabledReason;
+              break;
+            }
             const powerAutomateData = {
               bot: schedule.botName,
               subject: schedule.subject,
               start: { dateTime: schedule.start, timeZone: 'Asia/Seoul' },
               end: { dateTime: schedule.end, timeZone: 'Asia/Seoul' },
-              body: schedule.body || `프로세스: ${schedule.processName || ''}`
+              body: `[syncTag=${paSyncTag}]\n${schedule.body || `프로세스: ${schedule.processName || ''}`}`
             };
             try {
               await powerAutomateService.createSchedule(powerAutomateData);
               registeredCount++;
+              paCreatesThisRun += 1;
               currentSync.progress.paRegistered += 1;
             } catch (createError) {
               currentSync.progress.paCreateErrors += 1;

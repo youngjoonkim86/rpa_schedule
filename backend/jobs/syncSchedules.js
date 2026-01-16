@@ -20,6 +20,9 @@ const AUTO_REGISTER_TO_POWER_AUTOMATE = process.env.AUTO_REGISTER_TO_POWER_AUTOM
 // ✅ 요구사항: "Power Automate 조회가 200이 아니면 일정 등록(create)을 해야 함"
 const PA_CREATE_ON_QUERY_ERROR =
   String(process.env.PA_CREATE_ON_QUERY_ERROR || 'true').toLowerCase() === 'true';
+// ✅ 안전장치: 자동 동기화에서 PA create 폭주 방지
+const PA_MAX_CREATES_PER_RUN = Math.max(0, parseInt(process.env.PA_MAX_CREATES_PER_RUN || '200', 10) || 200);
+const PA_SYNC_TAG = String(process.env.PA_SYNC_TAG || 'RPA_SCHED_MANAGER');
 
 /**
  * 매시간 정각에 Brity RPA 스케줄 동기화
@@ -115,6 +118,7 @@ if (brityRpaService && Schedule && db) {
 
     // 2단계: Power Automate 처리(원본 기준)
     if (powerAutomateQueryAvailable || powerAutomateCreateAvailable) {
+      let paCreatesThisRun = 0;
       for (const schedule of schedulesForPa) {
         try {
           // ✅ DB에 이미 있으면 PA 중복 등록 방지
@@ -181,16 +185,22 @@ if (brityRpaService && Schedule && db) {
 
           if (!existsInPowerAutomate) {
             if (!powerAutomateCreateAvailable) break;
+            if (PA_MAX_CREATES_PER_RUN > 0 && paCreatesThisRun >= PA_MAX_CREATES_PER_RUN) {
+              powerAutomateCreateAvailable = false;
+              console.warn(`🛑 Power Automate create 상한 도달(자동 동기화): max ${PA_MAX_CREATES_PER_RUN}/run`);
+              break;
+            }
             const powerAutomateData = {
               bot: schedule.botName,
               subject: schedule.subject,
               start: { dateTime: schedule.start, timeZone: 'Asia/Seoul' },
               end: { dateTime: schedule.end, timeZone: 'Asia/Seoul' },
-              body: schedule.body || `프로세스: ${schedule.processName || ''}`
+              body: `[syncTag=${PA_SYNC_TAG}]\n${schedule.body || `프로세스: ${schedule.processName || ''}`}`
             };
             try {
               await powerAutomateService.createSchedule(powerAutomateData);
               registeredCount++;
+              paCreatesThisRun += 1;
             } catch (createError) {
               const status = createError?.status || createError?.response?.status;
               if (status === 502 || status === 503 || status === 504 || createError.code === 'ETIMEDOUT') {
