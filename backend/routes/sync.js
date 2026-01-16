@@ -123,6 +123,54 @@ router.get('/status', async (req, res) => {
 });
 
 /**
+ * POST /api/sync/pa/reset
+ * - Power Automate 등록 상태(pa_registrations)를 범위/봇 기준으로 초기화하여
+ *   다음 동기화에서 "다시 등록(create)" 되도록 합니다.
+ *
+ * body:
+ * {
+ *   "startDate": "YYYY-MM-DD",
+ *   "endDate": "YYYY-MM-DD",
+ *   "bot": "BOT5" // optional (없으면 전체 봇)
+ * }
+ */
+router.post('/pa/reset', async (req, res) => {
+  try {
+    const tz = 'Asia/Seoul';
+    const startDate = String(req.body?.startDate || '');
+    const endDate = String(req.body?.endDate || '');
+    const bot = req.body?.bot ? String(req.body.bot) : null;
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+      return res.status(400).json({
+        success: false,
+        message: 'startDate/endDate는 YYYY-MM-DD 형식이어야 합니다.'
+      });
+    }
+
+    const startIso = moment.tz(startDate, 'YYYY-MM-DD', tz).startOf('day').toISOString();
+    const endIso = moment.tz(endDate, 'YYYY-MM-DD', tz).endOf('day').toISOString();
+
+    const deleted = bot
+      ? await PowerAutomateRegistration.deleteInRange({ botId: bot, startIso, endIso })
+      : await PowerAutomateRegistration.deleteInRangeAll({ startIso, endIso });
+
+    return res.json({
+      success: true,
+      message: 'PA 등록 상태를 초기화했습니다. 이제 동일 범위로 동기화를 다시 실행하면 재등록됩니다.',
+      data: { bot: bot || 'ALL', startDate, endDate, deleted }
+    });
+  } catch (error) {
+    console.error('PA reset 오류:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'PA reset 중 오류가 발생했습니다.',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+/**
  * POST /api/sync/rpa-schedules - Brity RPA 스케줄 동기화
  */
 router.post('/rpa-schedules', async (req, res) => {

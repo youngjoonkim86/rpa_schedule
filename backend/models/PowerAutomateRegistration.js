@@ -145,6 +145,22 @@ class PowerAutomateRegistration {
 
     return result?.affectedRows || 0;
   }
+
+  // ✅ botId 없이 범위 전체(모든 봇) 삭제
+  static async deleteInRangeAll({ startIso, endIso }) {
+    await ensureTable();
+    const mysqlStart = toMySQLDateTime(startIso);
+    const mysqlEnd = toMySQLDateTime(endIso);
+    if (!mysqlStart || !mysqlEnd) return 0;
+
+    const [result] = await db.execute(
+      `DELETE FROM pa_registrations
+       WHERE start_datetime >= ?
+         AND end_datetime <= ?`,
+      [mysqlStart, mysqlEnd]
+    );
+    return result?.affectedRows || 0;
+  }
 }
 
 module.exports = PowerAutomateRegistration;
