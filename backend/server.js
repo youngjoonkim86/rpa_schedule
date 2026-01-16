@@ -16,6 +16,7 @@ const schedulesRouter = require('./routes/schedules');
 const botsRouter = require('./routes/bots');
 const syncRouter = require('./routes/sync');
 const brityRouter = require('./routes/brity');
+const powerAutomateRouter = require('./routes/powerAutomate');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -115,6 +116,7 @@ app.use('/api/schedules', schedulesRouter);
 app.use('/api/bots', botsRouter);
 app.use('/api/sync', syncRouter);
 app.use('/api/brity', brityRouter);
+app.use('/api/power-automate', powerAutomateRouter);
 
 // 404 핸들러
 app.use((req, res) => {

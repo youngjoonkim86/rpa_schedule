@@ -84,9 +84,28 @@ class PowerAutomateService {
           headers: {
             'Content-Type': 'application/json'
           },
-          timeout: 30000
+          timeout: 30000,
+          // ✅ 일부 Flow는 "조회된 일정 없음"을 300으로 반환함 (HTTP 300 or body.code=300)
+          validateStatus: (status) => (status >= 200 && status < 300) || status === 300
         }
       );
+
+      // ✅ HTTP 300을 "0건"으로 간주
+      if (response.status === 300) {
+        return { success: true, count: 0, events: [], treatedAsEmpty: true, treatedAs: 'http_300' };
+      }
+
+      // ✅ body.code=300 / message에 "조회된 일정 없음"인 경우도 0건으로 간주
+      const bodyCode = response?.data?.code ?? response?.data?.statusCode ?? null;
+      const bodyMsg = String(response?.data?.message || response?.data?.msg || '');
+      const treat300AsEmpty =
+        String(process.env.PA_TREAT_300_AS_EMPTY || 'true').toLowerCase() === 'true';
+      if (
+        treat300AsEmpty &&
+        (String(bodyCode) === '300' || bodyMsg.includes('조회된 일정 없음'))
+      ) {
+        return { success: true, count: 0, events: [], treatedAsEmpty: true, treatedAs: 'body_300' };
+      }
 
       // events는 JSON 문자열로 반환되므로 파싱 필요
       let events = [];
@@ -109,6 +128,21 @@ class PowerAutomateService {
     } catch (error) {
       const status = error?.response?.status;
       console.error('Power Automate 일정 조회 실패:', status ? `${status} ${error.message}` : error.message);
+
+      // ✅ 일부 환경에서 "조회 결과 0건"을 502로 반환하는 Flow가 있어, 옵션으로 0건으로 간주
+      // 기본값 true: 일부 Flow가 "조회된 일정 없음"을 502로 반환하는 케이스를 정상(0건)으로 취급
+      const treat502AsEmpty = String(process.env.PA_TREAT_502_AS_EMPTY || 'true').toLowerCase() === 'true';
+      if (treat502AsEmpty && status === 502) {
+        return { success: true, count: 0, events: [], treatedAsEmpty: true, treatedAs: 'http_502' };
+      }
+
+      // ✅ (옵션) HTTP 300을 에러로 던지는 환경(프록시/중간계층) 대비
+      const treat300AsEmpty =
+        String(process.env.PA_TREAT_300_AS_EMPTY || 'true').toLowerCase() === 'true';
+      if (treat300AsEmpty && status === 300) {
+        return { success: true, count: 0, events: [], treatedAsEmpty: true, treatedAs: 'http_300_catch' };
+      }
+
       const err = new Error(`Power Automate API 오류${status ? ` (${status})` : ''}: ${error.message}`);
       err.status = status;
       err.code = error?.code;
