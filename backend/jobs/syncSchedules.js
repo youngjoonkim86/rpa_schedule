@@ -122,20 +122,21 @@ if (brityRpaService && Schedule && db) {
 
     // 2단계: Power Automate 처리(원본 기준)
     if (powerAutomateQueryAvailable || powerAutomateCreateAvailable) {
-      // ✅ 당일 갱신(diff 감지 → PUT refresh)
+      // ✅ 범위 갱신(diff 감지 → PUT refresh)
       try {
         const refreshUrlConfigured = !!process.env.POWER_AUTOMATE_REFRESH_URL;
         if (PA_REFRESH_ON_DIFF && refreshUrlConfigured && powerAutomateService?.refreshSchedulesByBotRange) {
-          const todayKst = moment.tz(tz).format('YYYY-MM-DD');
-          const dayStartIso = moment.tz(todayKst, 'YYYY-MM-DD', tz).startOf('day').toISOString();
-          const dayEndIso = moment.tz(todayKst, 'YYYY-MM-DD', tz).endOf('day').toISOString();
-          const dayStartLocal = `${todayKst}T00:00:00`;
-          const dayEndLocal = `${todayKst}T23:59:59`;
+          const rangeStartStr = startDateStr;
+          const rangeEndStr = endDateStr;
+          const rangeStartIso = moment.tz(rangeStartStr, 'YYYY-MM-DD', tz).startOf('day').toISOString();
+          const rangeEndIso = moment.tz(rangeEndStr, 'YYYY-MM-DD', tz).endOf('day').toISOString();
+          const rangeStartLocal = `${rangeStartStr}T00:00:00`;
+          const rangeEndLocal = `${rangeEndStr}T23:59:59`;
 
           const desiredByBot = new Map();
           for (const s of schedulesForPa) {
             const d = moment.tz(s.start, tz).format('YYYY-MM-DD');
-            if (d !== todayKst) continue;
+            if (d < rangeStartStr || d > rangeEndStr) continue;
             const botKey = s.botName || s.botId || '';
             if (!botKey) continue;
             const key = PowerAutomateRegistration.buildKeyFromIso({
@@ -153,8 +154,8 @@ if (brityRpaService && Schedule && db) {
             if (PA_MAX_REFRESH_CALLS > 0 && refreshCalls >= PA_MAX_REFRESH_CALLS) break;
             const registeredSet = await PowerAutomateRegistration.listRegisteredKeySetInRange({
               botId: botKey,
-              startIso: dayStartIso,
-              endIso: dayEndIso
+              startIso: rangeStartIso,
+              endIso: rangeEndIso
             });
 
             let different = desiredSet.size !== registeredSet.size;
@@ -165,16 +166,16 @@ if (brityRpaService && Schedule && db) {
             }
 
             if (different) {
-              console.log(`♻️(자동) PA 당일 갱신(diff): bot=${botKey} desired=${desiredSet.size} registered=${registeredSet.size}`);
+              console.log(`♻️(자동) PA 범위 갱신(diff): bot=${botKey} range=${rangeStartStr}~${rangeEndStr} desired=${desiredSet.size} registered=${registeredSet.size}`);
               try {
                 await powerAutomateService.refreshSchedulesByBotRange({
                   bot: botKey,
-                  startDateTime: dayStartLocal,
-                  endDateTime: dayEndLocal,
+                  startDateTime: rangeStartLocal,
+                  endDateTime: rangeEndLocal,
                   timeZone: tz
                 });
                 refreshCalls += 1;
-                await PowerAutomateRegistration.deleteInRange({ botId: botKey, startIso: dayStartIso, endIso: dayEndIso });
+                await PowerAutomateRegistration.deleteInRange({ botId: botKey, startIso: rangeStartIso, endIso: rangeEndIso });
                 for (const k of desiredSet) {
                   const [subject, startDt, endDt] = String(k).split('||');
                   const startIso = moment.tz(startDt, 'YYYY-MM-DD HH:mm:ss', tz).toISOString();
@@ -226,19 +227,15 @@ if (brityRpaService && Schedule && db) {
                   const scheduleStart = new Date(schedule.start);
                   const scheduleEnd = new Date(schedule.end);
 
-                  const botMatch =
-                    event.bot === schedule.botName ||
-                    event.bot === schedule.botId ||
-                    event.subject?.includes(schedule.botName) ||
-                    event.subject?.includes(schedule.botId) ||
-                    event.subject === schedule.subject;
+                  const botMatch = event.bot === schedule.botName || event.bot === schedule.botId;
+                  const subjectMatch = event.subject === schedule.subject;
 
                   const timeDiff = Math.abs(eventStart.getTime() - scheduleStart.getTime());
                   const timeOverlap =
                     (eventStart <= scheduleEnd && eventEnd >= scheduleStart) ||
                     (timeDiff < 5 * 60 * 1000);
 
-                  return botMatch && timeOverlap;
+                  return botMatch && subjectMatch && timeOverlap;
                 });
               }
               if (existsInPowerAutomate) {
