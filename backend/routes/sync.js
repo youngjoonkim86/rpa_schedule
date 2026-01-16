@@ -338,6 +338,10 @@ router.post('/rpa-schedules', async (req, res) => {
     // - 기본값 0(무제한). 필요 시 env로 제한: PA_MAX_CREATES_PER_RUN=200
     const paMaxCreatesPerRun = Math.max(0, parseInt(process.env.PA_MAX_CREATES_PER_RUN || '0', 10) || 0);
     const paSyncTag = String(process.env.PA_SYNC_TAG || 'RPA_SCHED_MANAGER');
+    // ✅ 강제 옵션: PA 존재 여부 체크(query 결과)를 무시하고 create를 시도
+    // - pa_registrations가 REGISTERED인 경우는 계속 스킵(중복 방지)
+    const paDisableExistenceCheck =
+      String(process.env.PA_DISABLE_EXISTENCE_CHECK || 'false').toLowerCase() === 'true';
 
     // (옵션) DB 저장 row 수 절감을 위한 시간 버킷 그룹핑
     // ✅ PA는 원본(정확한 시간)으로 처리, DB는 버킷으로 묶어서 저장
@@ -543,6 +547,11 @@ router.post('/rpa-schedules', async (req, res) => {
             existsInPowerAutomate = createOnQueryError ? false : true;
           }
 
+          // ✅ 강제모드: query로 "이미 존재" 판단을 무시하고 create로 진행
+          if (paDisableExistenceCheck) {
+            existsInPowerAutomate = false;
+          }
+
           if (!existsInPowerAutomate) {
             if (!powerAutomateCreateAvailable) {
               // create도 중단 상태면 더 진행해도 의미 없음
@@ -688,6 +697,10 @@ router.post('/rpa-schedules', async (req, res) => {
     console.log(`   - DB 저장/업데이트: ${syncCount}개 (중복은 자동으로 업데이트됨)`);
     console.log(`   - Power Automate 등록: ${registeredCount}개`);
     console.log(`   - Power Automate 건너뜀 (이미 존재): ${skippedCount}개`);
+    console.log(`   - Power Automate REFRESH(PUT): ${currentSync.progress.paRefreshCalls}회 (실패 ${currentSync.progress.paRefreshErrors}회)`);
+    if (currentSync.progress.paDisabledReason) {
+      console.log(`   - Power Automate 비활성 사유: ${currentSync.progress.paDisabledReason}`);
+    }
     console.log(`   - 실패: ${errorCount}개`);
 
     // ✅ 마지막 결과 요약 저장(프론트/점검용)

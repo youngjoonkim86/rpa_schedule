@@ -28,6 +28,9 @@ const PA_MAX_CREATES_PER_RUN = Math.max(0, parseInt(process.env.PA_MAX_CREATES_P
 const PA_SYNC_TAG = String(process.env.PA_SYNC_TAG || 'RPA_SCHED_MANAGER');
 const PA_REFRESH_ON_DIFF = String(process.env.PA_REFRESH_ON_DIFF || 'true').toLowerCase() === 'true';
 const PA_MAX_REFRESH_CALLS = Math.max(0, parseInt(process.env.PA_MAX_REFRESH_CALLS || '10', 10) || 10);
+// ✅ 강제 옵션: PA 존재 여부 체크(query 결과)를 무시하고 create를 시도
+// - pa_registrations가 REGISTERED인 경우는 계속 스킵(중복 방지)
+const PA_DISABLE_EXISTENCE_CHECK = String(process.env.PA_DISABLE_EXISTENCE_CHECK || 'false').toLowerCase() === 'true';
 
 /**
  * 매시간 정각에 Brity RPA 스케줄 동기화
@@ -261,6 +264,11 @@ if (brityRpaService && Schedule && db) {
             existsInPowerAutomate = PA_CREATE_ON_QUERY_ERROR ? false : true;
           }
 
+          // ✅ 강제모드: query로 "이미 존재" 판단을 무시하고 create로 진행
+          if (PA_DISABLE_EXISTENCE_CHECK) {
+            existsInPowerAutomate = false;
+          }
+
           if (!existsInPowerAutomate) {
             if (!powerAutomateCreateAvailable) break;
             if (PA_MAX_CREATES_PER_RUN > 0 && paCreatesThisRun >= PA_MAX_CREATES_PER_RUN) {
@@ -383,6 +391,9 @@ if (brityRpaService && Schedule && db) {
     }
     
     console.log(`✅ 자동 동기화 완료: ${syncCount}개 DB 저장, ${registeredCount}개 Power Automate 등록, ${skippedCount}개 건너뜀, ${errorCount}개 실패`);
+    if (PA_DISABLE_EXISTENCE_CHECK) {
+      console.log(`   - (참고) PA_DISABLE_EXISTENCE_CHECK=true: query 기반 '이미 존재' 판단을 무시하고 create를 시도했습니다.`);
+    }
   } catch (error) {
     console.error('❌ 자동 동기화 실패:', error);
     
