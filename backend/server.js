@@ -20,6 +20,8 @@ const brityRouter = require('./routes/brity');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
+const LISTEN_RETRY_DELAY_MS = parseInt(process.env.LISTEN_RETRY_DELAY_MS || '1000', 10) || 1000;
+const LISTEN_RETRY_MAX = parseInt(process.env.LISTEN_RETRY_MAX || '5', 10) || 5;
 
 // 미들웨어
 app.use(helmet());
@@ -133,13 +135,44 @@ app.use((err, req, res, next) => {
 });
 
 // 서버 시작 (IP 접속을 위해 기본 0.0.0.0 바인딩)
-app.listen(PORT, HOST, () => {
-  console.log(`🚀 서버가 포트 ${PORT}에서 실행 중입니다.`);
-  console.log(`📍 환경: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`🌐 바인딩: ${HOST}:${PORT}`);
-  console.log(`🔗 헬스체크: http://localhost:${PORT}/health`);
-  console.log(`📡 API 엔드포인트: http://localhost:${PORT}/api`);
-});
+// ✅ nodemon 재시작 시 포트 릴리즈 레이스로 EADDRINUSE가 자주 발생하므로 짧게 재시도합니다.
+let listenAttempts = 0;
+let server = null;
+
+const startServer = () => {
+  server = app.listen(PORT, HOST, () => {
+    listenAttempts = 0;
+    console.log(`🚀 서버가 포트 ${PORT}에서 실행 중입니다.`);
+    console.log(`📍 환경: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`🌐 바인딩: ${HOST}:${PORT}`);
+    console.log(`🔗 헬스체크: http://localhost:${PORT}/health`);
+    console.log(`📡 API 엔드포인트: http://localhost:${PORT}/api`);
+  });
+
+  server.on('error', (err) => {
+    if (err && err.code === 'EADDRINUSE') {
+      listenAttempts += 1;
+      if (listenAttempts <= LISTEN_RETRY_MAX) {
+        console.warn(`⚠️ 포트 ${PORT} 사용 중(EADDRINUSE). ${LISTEN_RETRY_DELAY_MS}ms 후 재시도 (${listenAttempts}/${LISTEN_RETRY_MAX})`);
+        setTimeout(() => {
+          try {
+            server.close(() => startServer());
+          } catch (_) {
+            startServer();
+          }
+        }, LISTEN_RETRY_DELAY_MS);
+        return;
+      }
+      console.error(`❌ 포트 ${PORT} 사용 중(EADDRINUSE) - 재시도 초과. 다른 node 프로세스가 3000을 점유 중인지 확인하세요.`);
+      process.exit(1);
+    }
+
+    console.error('❌ 서버 오류:', err);
+    process.exit(1);
+  });
+};
+
+startServer();
 
 // 우아한 종료
 process.on('SIGTERM', () => {
