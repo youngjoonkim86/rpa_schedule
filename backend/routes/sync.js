@@ -104,12 +104,28 @@ router.get('/status', async (req, res) => {
       });
     }
     
+    // ✅ 서버 재시작 등으로 메모리(lastResult)가 비어있으면, sync_logs.error_message(JSON)를 파싱해 복원
+    let persistedLastResult = null;
+    if (!currentSync.lastResult) {
+      const raw = latest?.[0]?.error_message;
+      if (raw && typeof raw === 'string' && raw.trim().startsWith('{')) {
+        try {
+          const parsed = JSON.parse(raw);
+          if (parsed && typeof parsed === 'object' && parsed.lastResult) {
+            persistedLastResult = parsed.lastResult;
+          }
+        } catch (_) {
+          // ignore
+        }
+      }
+    }
+
     res.json({
       success: true,
       data: {
         inProgress: false,
         latest: latest[0],
-        lastResult: currentSync.lastResult
+        lastResult: currentSync.lastResult || persistedLastResult
       }
     });
   } catch (error) {
@@ -717,6 +733,10 @@ router.post('/rpa-schedules', async (req, res) => {
     
     // 동기화 로그 기록
     try {
+      // ✅ 재시작에도 lastResult가 보이도록 sync_logs.error_message에 JSON 저장
+      const payload = {
+        lastResult: currentSync.lastResult
+      };
       await db.execute(
         `INSERT INTO sync_logs (sync_type, sync_status, records_synced, error_message)
          VALUES (?, ?, ?, ?)`,
@@ -724,7 +744,7 @@ router.post('/rpa-schedules', async (req, res) => {
           'BRITY_RPA',
           errorCount === 0 ? 'SUCCESS' : (syncCount > 0 ? 'PARTIAL' : 'FAILED'),
           syncCount,
-          errorCount > 0 ? `${errorCount}개 레코드 저장 실패` : null
+          JSON.stringify(payload)
         ]
       );
     } catch (logError) {

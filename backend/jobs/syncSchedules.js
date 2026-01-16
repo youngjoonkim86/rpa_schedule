@@ -391,6 +391,20 @@ if (brityRpaService && Schedule && db) {
     
     // 동기화 로그 기록
     try {
+      // ✅ 재시작에도 결과를 확인할 수 있도록 sync_logs.error_message에 JSON 저장
+      const payload = {
+        lastResult: {
+          finishedAt: new Date().toISOString(),
+          range: { startDate: startDateStr, endDate: endDateStr },
+          rawCount: schedulesForPa.length,
+          dbCount: schedulesForDb.length,
+          dbUpserted: syncCount,
+          failed: errorCount,
+          paEnabled: AUTO_REGISTER_TO_POWER_AUTOMATE && powerAutomateEnabled,
+          paRegistered: registeredCount,
+          paSkipped: skippedCount
+        }
+      };
       await db.execute(
         `INSERT INTO sync_logs (sync_type, sync_status, records_synced, error_message)
          VALUES (?, ?, ?, ?)`,
@@ -398,7 +412,7 @@ if (brityRpaService && Schedule && db) {
           'BRITY_RPA',
           errorCount === 0 ? 'SUCCESS' : (syncCount > 0 ? 'PARTIAL' : 'FAILED'),
           syncCount,
-          errorCount > 0 ? `${errorCount}개 레코드 저장 실패` : null
+          JSON.stringify(payload)
         ]
       );
     } catch (logError) {
