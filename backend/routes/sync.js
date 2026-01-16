@@ -263,6 +263,25 @@ router.post('/rpa-schedules', async (req, res) => {
       return `${bot}||${subj}||${start}||${end}`;
     };
 
+    // ✅ 기간을 "1일 단위"로 쪼개서 처리(조회/등록 안정화)
+    const SYNC_CHUNK_DAYS = Math.max(1, parseInt(process.env.SYNC_CHUNK_DAYS || '1', 10) || 1);
+    const buildDateChunks = (startStr, endStr, days, tzName) => {
+      const chunks = [];
+      let cur = moment.tz(startStr, 'YYYY-MM-DD', tzName).startOf('day');
+      const end = moment.tz(endStr, 'YYYY-MM-DD', tzName).startOf('day');
+      while (cur.isSameOrBefore(end, 'day')) {
+        const chunkStart = cur.clone();
+        const chunkEnd = cur.clone().add(Math.max(1, days) - 1, 'day');
+        const actualEnd = chunkEnd.isAfter(end, 'day') ? end.clone() : chunkEnd;
+        chunks.push({
+          startDate: chunkStart.format('YYYY-MM-DD'),
+          endDate: actualEnd.format('YYYY-MM-DD'),
+        });
+        cur = actualEnd.clone().add(1, 'day');
+      }
+      return chunks;
+    };
+
     let schedules = [];
     // ✅ Power Automate 등록은 "등록 스케줄(schedulings)"만 대상으로 해야 함
     // - jobs/list(실행 이력)을 그대로 PA에 등록하면 수천건이 생성될 수 있음
@@ -299,11 +318,18 @@ router.post('/rpa-schedules', async (req, res) => {
       if (mergeSchedulings && endDate >= todayStr) {
         const schedStartStr = startDate > todayStr ? startDate : todayStr;
         console.log(`➕ /schedulings/* 병합(반복 규칙 전개): ${schedStartStr} ~ ${endDate}`);
-        const schedRes = await brityRpaService.getSchedulesWithMeta(schedStartStr, endDate);
-        brityDebug.schedulings = schedRes.meta;
-        // ✅ PA는 등록 스케줄만 사용
-        schedulesForPaBase = [...schedulesForPaBase, ...schedRes.items];
-        schedules = [...schedules, ...schedRes.items];
+        // ✅ 하루 단위(또는 N일 단위)로 끊어서 조회
+        const chunks = buildDateChunks(schedStartStr, endDate, SYNC_CHUNK_DAYS, tz);
+        let totalFetched = 0;
+        brityDebug.schedulingsChunks = { enabled: true, chunkDays: SYNC_CHUNK_DAYS, chunks: chunks.length, fetched: 0 };
+        for (const c of chunks) {
+          const schedRes = await brityRpaService.getSchedulesWithMeta(c.startDate, c.endDate);
+          totalFetched += schedRes.items.length;
+          // ✅ PA는 등록 스케줄만 사용
+          schedulesForPaBase = [...schedulesForPaBase, ...schedRes.items];
+          schedules = [...schedules, ...schedRes.items];
+        }
+        brityDebug.schedulingsChunks.fetched = totalFetched;
       }
 
       // 중복 제거
@@ -314,10 +340,17 @@ router.post('/rpa-schedules', async (req, res) => {
       brityDebug.merged.afterDedupe = schedules.length;
     } else {
       console.log('📋 1단계: RPA 등록 스케줄 조회 (/schedulings/list)');
-      const schedRes = await brityRpaService.getSchedulesWithMeta(startDate, endDate);
-      schedules = schedRes.items;
-      schedulesForPaBase = schedRes.items;
-      brityDebug.schedulings = schedRes.meta;
+      // ✅ 하루 단위(또는 N일 단위)로 끊어서 조회
+      const chunks = buildDateChunks(startDate, endDate, SYNC_CHUNK_DAYS, tz);
+      brityDebug.schedulingsChunks = { enabled: true, chunkDays: SYNC_CHUNK_DAYS, chunks: chunks.length, fetched: 0 };
+      let collected = [];
+      for (const c of chunks) {
+        const schedRes = await brityRpaService.getSchedulesWithMeta(c.startDate, c.endDate);
+        collected = [...collected, ...schedRes.items];
+      }
+      brityDebug.schedulingsChunks.fetched = collected.length;
+      schedules = collected;
+      schedulesForPaBase = collected;
       brityDebug.merged.beforeDedupe = schedules.length;
       brityDebug.merged.afterDedupe = schedules.length;
     }
@@ -331,7 +364,9 @@ router.post('/rpa-schedules', async (req, res) => {
     const createOnQueryError =
       String(process.env.PA_CREATE_ON_QUERY_ERROR || 'true').toLowerCase() === 'true';
     const enablePaRefreshOnDiff =
-      String(process.env.PA_REFRESH_ON_DIFF || 'true').toLowerCase() === 'true';
+      // ✅ 기본값 false: refresh(삭제 후 재등록) 모드는 PA "일정등록(create)"이 안 도는 것처럼 보이게 만들고,
+      // 일부 환경에서는 refresh가 성공처럼 보이지만 실제 등록이 불완전할 수 있어 기본은 끕니다.
+      String(process.env.PA_REFRESH_ON_DIFF || 'false').toLowerCase() === 'true';
     const paMaxRefreshCalls = Math.max(0, parseInt(process.env.PA_MAX_REFRESH_CALLS || '10', 10) || 10);
 
     // ✅ 안전장치(선택): PA 등록(create) 폭주 방지 상한
@@ -467,8 +502,22 @@ router.post('/rpa-schedules', async (req, res) => {
         console.warn(`⚠️ PA 당일 갱신(diff) 처리 실패(계속 진행): ${e.message}`);
       }
 
+      // ✅ PA도 "1일 단위"로 쪼개서 처리(요구사항)
+      const paByDay = new Map(); // dateStr -> schedules[]
+      for (const s of schedulesForPa) {
+        const d = moment.tz(s.start, tz).format('YYYY-MM-DD');
+        if (!paByDay.has(d)) paByDay.set(d, []);
+        paByDay.get(d).push(s);
+      }
+      const paDays = Array.from(paByDay.keys()).sort();
+
       let paCreatesThisRun = 0;
-      for (const schedule of schedulesForPa) {
+      for (const day of paDays) {
+        const daySchedules = paByDay.get(day) || [];
+        console.log(`📅 PA 처리(일자별): ${day} (${daySchedules.length}건)`);
+        currentSync.progress.day = day;
+
+        for (const schedule of daySchedules) {
         try {
           // ✅ PA 등록 상태(별도 테이블) 기준으로 중복 방지/재시도
           const botKey = schedule.botName || schedule.botId || '';
@@ -604,6 +653,7 @@ router.post('/rpa-schedules', async (req, res) => {
         } catch (e) {
           // PA 실패는 전체 동기화 실패로 보지 않음
         }
+      }
       }
     }
 

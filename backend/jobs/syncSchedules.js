@@ -26,7 +26,9 @@ const PA_CREATE_ON_QUERY_ERROR =
 // - 기본값 0(무제한). 필요 시 env로 제한: PA_MAX_CREATES_PER_RUN=200
 const PA_MAX_CREATES_PER_RUN = Math.max(0, parseInt(process.env.PA_MAX_CREATES_PER_RUN || '0', 10) || 0);
 const PA_SYNC_TAG = String(process.env.PA_SYNC_TAG || 'RPA_SCHED_MANAGER');
-const PA_REFRESH_ON_DIFF = String(process.env.PA_REFRESH_ON_DIFF || 'true').toLowerCase() === 'true';
+// ✅ 기본값 false: refresh(삭제 후 재등록) 모드는 PA "일정등록(create)"이 안 도는 것처럼 보이게 만들고,
+// 일부 환경에서는 refresh가 성공처럼 보이지만 실제 등록이 불완전할 수 있어 기본은 끕니다.
+const PA_REFRESH_ON_DIFF = String(process.env.PA_REFRESH_ON_DIFF || 'false').toLowerCase() === 'true';
 const PA_MAX_REFRESH_CALLS = Math.max(0, parseInt(process.env.PA_MAX_REFRESH_CALLS || '10', 10) || 10);
 // ✅ 강제 옵션: PA 존재 여부 체크(query 결과)를 무시하고 create를 시도
 // - pa_registrations가 REGISTERED인 경우는 계속 스킵(중복 방지)
@@ -67,6 +69,25 @@ if (brityRpaService && Schedule && db) {
       return `${bot}||${subj}||${start}||${end}`;
     };
 
+    // ✅ 기간을 "1일 단위"로 쪼개서 처리(조회/등록 안정화)
+    const SYNC_CHUNK_DAYS = Math.max(1, parseInt(process.env.SYNC_CHUNK_DAYS || '1', 10) || 1);
+    const buildDateChunks = (startStr, endStr, days, tzName) => {
+      const chunks = [];
+      let cur = moment.tz(startStr, 'YYYY-MM-DD', tzName).startOf('day');
+      const end = moment.tz(endStr, 'YYYY-MM-DD', tzName).startOf('day');
+      while (cur.isSameOrBefore(end, 'day')) {
+        const chunkStart = cur.clone();
+        const chunkEnd = cur.clone().add(Math.max(1, days) - 1, 'day');
+        const actualEnd = chunkEnd.isAfter(end, 'day') ? end.clone() : chunkEnd;
+        chunks.push({
+          startDate: chunkStart.format('YYYY-MM-DD'),
+          endDate: actualEnd.format('YYYY-MM-DD'),
+        });
+        cur = actualEnd.clone().add(1, 'day');
+      }
+      return chunks;
+    };
+
     let schedules = [];
     // ✅ Power Automate 등록은 "등록 스케줄(schedulings)"만 대상으로 해야 함
     let schedulesForPaBase = [];
@@ -90,9 +111,13 @@ if (brityRpaService && Schedule && db) {
         endDateStr >= todayStr;
       if (mergeSchedulings && endDateStr >= todayStr) {
         const schedStartStr = startDateStr > todayStr ? startDateStr : todayStr;
-        const schedItems = await brityRpaService.getSchedules(schedStartStr, endDateStr);
-        schedulesForPaBase = [...schedulesForPaBase, ...schedItems];
-        schedules = [...schedules, ...schedItems];
+        // ✅ 하루 단위(또는 N일 단위)로 끊어서 조회
+        const chunks = buildDateChunks(schedStartStr, endDateStr, SYNC_CHUNK_DAYS, tz);
+        for (const c of chunks) {
+          const schedItems = await brityRpaService.getSchedules(c.startDate, c.endDate);
+          schedulesForPaBase = [...schedulesForPaBase, ...schedItems];
+          schedules = [...schedules, ...schedItems];
+        }
       }
 
       const map = new Map();
