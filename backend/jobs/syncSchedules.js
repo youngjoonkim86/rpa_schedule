@@ -3,11 +3,13 @@ const moment = require('moment-timezone');
 
 // 동적 로딩 (에러 방지)
 let brityRpaService, powerAutomateService, Schedule, db, redis, groupSchedulesByTimeBucket;
+let PowerAutomateRegistration;
 
 try {
   brityRpaService = require('../services/brityRpaService');
   powerAutomateService = require('../services/powerAutomateService');
   Schedule = require('../models/Schedule');
+  PowerAutomateRegistration = require('../models/PowerAutomateRegistration');
   db = require('../config/database');
   redis = require('../config/redis');
   ({ groupSchedulesByTimeBucket } = require('../utils/scheduleGrouping'));
@@ -121,15 +123,14 @@ if (brityRpaService && Schedule && db) {
       let paCreatesThisRun = 0;
       for (const schedule of schedulesForPa) {
         try {
-          // ✅ DB에 이미 있으면 PA 중복 등록 방지
-          const botIdForDb = schedule.botId || schedule.botName;
-          const existsInDbForPa = await Schedule.existsExactActive({
-            botId: botIdForDb,
+          const botKey = schedule.botName || schedule.botId || '';
+          const alreadyRegistered = await PowerAutomateRegistration.isRegistered({
+            botId: botKey,
             subject: schedule.subject,
             startIso: schedule.start,
             endIso: schedule.end
           });
-          if (existsInDbForPa) {
+          if (alreadyRegistered) {
             skippedCount++;
             continue;
           }
@@ -169,6 +170,14 @@ if (brityRpaService && Schedule && db) {
                   return botMatch && timeOverlap;
                 });
               }
+              if (existsInPowerAutomate) {
+                await PowerAutomateRegistration.markRegistered({
+                  botId: botKey,
+                  subject: schedule.subject,
+                  startIso: schedule.start,
+                  endIso: schedule.end
+                });
+              }
             } catch (queryError) {
               const status = queryError?.status || queryError?.response?.status;
               // ✅ 조회 실패 시 create 시도(요구사항)
@@ -201,8 +210,21 @@ if (brityRpaService && Schedule && db) {
               await powerAutomateService.createSchedule(powerAutomateData);
               registeredCount++;
               paCreatesThisRun += 1;
+              await PowerAutomateRegistration.markRegistered({
+                botId: botKey,
+                subject: schedule.subject,
+                startIso: schedule.start,
+                endIso: schedule.end
+              });
             } catch (createError) {
               const status = createError?.status || createError?.response?.status;
+              await PowerAutomateRegistration.markFailed({
+                botId: botKey,
+                subject: schedule.subject,
+                startIso: schedule.start,
+                endIso: schedule.end,
+                errorMessage: createError?.message
+              });
               if (status === 502 || status === 503 || status === 504 || createError.code === 'ETIMEDOUT') {
                 powerAutomateCreateAvailable = false;
                 console.warn(`🛑 Power Automate create 중단(자동 동기화): failed (${status || createError.code || 'unknown'})`);

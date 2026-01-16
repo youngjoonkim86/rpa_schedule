@@ -50,6 +50,25 @@ CREATE TABLE IF NOT EXISTS sync_logs (
   INDEX idx_sync_type (sync_type)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Power Automate 등록 상태 추적 테이블
+-- - Brity(DB)에는 있지만 PA에 아직 등록되지 않은 스케줄(특히 미래)을 재시도하기 위해 필요
+CREATE TABLE IF NOT EXISTS pa_registrations (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  bot_id VARCHAR(50) NOT NULL,
+  subject VARCHAR(255) NOT NULL,
+  start_datetime DATETIME NOT NULL,
+  end_datetime DATETIME NOT NULL,
+  status ENUM('REGISTERED','FAILED') NOT NULL DEFAULT 'REGISTERED',
+  attempt_count INT NOT NULL DEFAULT 0,
+  last_error TEXT,
+  last_attempt_at TIMESTAMP NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uniq_pa_reg (bot_id, subject, start_datetime, end_datetime),
+  INDEX idx_pa_reg_status (status),
+  INDEX idx_pa_reg_start (start_datetime)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- 초기 테스트 데이터
 INSERT INTO bot_schedules (bot_id, bot_name, subject, start_datetime, end_datetime, source_system) VALUES
 ('BOT1', 'BOT1', '테스트 일정 1', '2026-01-15 09:00:00', '2026-01-15 10:00:00', 'MANUAL'),

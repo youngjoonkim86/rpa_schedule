@@ -3,6 +3,7 @@ const router = express.Router();
 const brityRpaService = require('../services/brityRpaService');
 const powerAutomateService = require('../services/powerAutomateService');
 const Schedule = require('../models/Schedule');
+const PowerAutomateRegistration = require('../models/PowerAutomateRegistration');
 const db = require('../config/database');
 const moment = require('moment-timezone');
 const redis = require('../config/redis');
@@ -332,15 +333,15 @@ router.post('/rpa-schedules', async (req, res) => {
       let paCreatesThisRun = 0;
       for (const schedule of schedulesForPa) {
         try {
-          // ✅ DB에 이미 있으면(동기화 완료/기등록) PA 중복 등록 방지: query/create 모두 스킵
-          const botIdForDb = schedule.botId || schedule.botName;
-          const existsInDbForPa = await Schedule.existsExactActive({
-            botId: botIdForDb,
+          // ✅ PA 등록 상태(별도 테이블) 기준으로 중복 방지/재시도
+          const botKey = schedule.botName || schedule.botId || '';
+          const alreadyRegistered = await PowerAutomateRegistration.isRegistered({
+            botId: botKey,
             subject: schedule.subject,
             startIso: schedule.start,
             endIso: schedule.end
           });
-          if (existsInDbForPa) {
+          if (alreadyRegistered) {
             skippedCount++;
             currentSync.progress.paSkipped += 1;
             continue;
@@ -380,6 +381,16 @@ router.post('/rpa-schedules', async (req, res) => {
                     (timeDiff < 5 * 60 * 1000);
 
                   return botMatch && timeOverlap;
+                });
+              }
+
+              // query로 존재 확인되면 등록 상태 저장(다음 run에서 재조회/재등록 방지)
+              if (existsInPowerAutomate) {
+                await PowerAutomateRegistration.markRegistered({
+                  botId: botKey,
+                  subject: schedule.subject,
+                  startIso: schedule.start,
+                  endIso: schedule.end
                 });
               }
             } catch (queryError) {
@@ -425,9 +436,22 @@ router.post('/rpa-schedules', async (req, res) => {
               registeredCount++;
               paCreatesThisRun += 1;
               currentSync.progress.paRegistered += 1;
+              await PowerAutomateRegistration.markRegistered({
+                botId: botKey,
+                subject: schedule.subject,
+                startIso: schedule.start,
+                endIso: schedule.end
+              });
             } catch (createError) {
               currentSync.progress.paCreateErrors += 1;
               const status = createError?.status || createError?.response?.status;
+              await PowerAutomateRegistration.markFailed({
+                botId: botKey,
+                subject: schedule.subject,
+                startIso: schedule.start,
+                endIso: schedule.end,
+                errorMessage: createError?.message
+              });
               if (!powerAutomateDisabledReason && (status === 502 || status === 503 || status === 504 || createError.code === 'ETIMEDOUT')) {
                 powerAutomateCreateAvailable = false;
                 powerAutomateDisabledReason = `Power Automate create failed (${status || createError.code || 'unknown'})`;
