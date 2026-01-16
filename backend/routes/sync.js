@@ -28,6 +28,8 @@ const currentSync = {
     paSkipped: 0,
     paQueryErrors: 0,
     paCreateErrors: 0,
+    paRefreshCalls: 0,
+    paRefreshErrors: 0,
     paDisabledReason: null,
   }
 };
@@ -173,6 +175,8 @@ router.post('/rpa-schedules', async (req, res) => {
       paSkipped: 0,
       paQueryErrors: 0,
       paCreateErrors: 0,
+      paRefreshCalls: 0,
+      paRefreshErrors: 0,
       paDisabledReason: null,
     };
 
@@ -278,6 +282,9 @@ router.post('/rpa-schedules', async (req, res) => {
     // - 기본값 true (필요 시 env로 끌 수 있음)
     const createOnQueryError =
       String(process.env.PA_CREATE_ON_QUERY_ERROR || 'true').toLowerCase() === 'true';
+    const enablePaRefreshOnDiff =
+      String(process.env.PA_REFRESH_ON_DIFF || 'true').toLowerCase() === 'true';
+    const paMaxRefreshCalls = Math.max(0, parseInt(process.env.PA_MAX_REFRESH_CALLS || '10', 10) || 10);
 
     // ✅ 안전장치: PA 등록(create) 폭주 방지
     // - query 실패 시 createOnQueryError=true 이면 대량 생성 위험이 있으므로 상한을 둡니다.
@@ -330,6 +337,84 @@ router.post('/rpa-schedules', async (req, res) => {
     // 2단계: Power Automate 처리(원본 기준)
     if ((powerAutomateQueryAvailable || powerAutomateCreateAvailable) && powerAutomateService && powerAutomateEnabled) {
       console.log(`🔗 Power Automate 연동: enabled=true, query=${!!process.env.POWER_AUTOMATE_QUERY_URL}, create=${!!process.env.POWER_AUTOMATE_CREATE_URL}`);
+
+      // ✅ 당일 갱신: "기존 값과 상이"하면 PUT(삭제 후 재등록) 호출
+      // - 비교 기준: (Brity schedulings 기반) 원하는 스케줄 vs pa_registrations(REGISTERED) 기록
+      // - diff가 있으면 bot 단위로 하루 범위를 PUT 1회 호출
+      try {
+        const refreshUrlConfigured = !!process.env.POWER_AUTOMATE_REFRESH_URL;
+        if (enablePaRefreshOnDiff && refreshUrlConfigured) {
+          const todayKst = moment.tz(tz).format('YYYY-MM-DD');
+          const dayStartIso = moment.tz(todayKst, 'YYYY-MM-DD', tz).startOf('day').toISOString();
+          const dayEndIso = moment.tz(todayKst, 'YYYY-MM-DD', tz).endOf('day').toISOString();
+          const dayStartLocal = `${todayKst}T00:00:00`;
+          const dayEndLocal = `${todayKst}T23:59:59`;
+
+          const desiredByBot = new Map(); // botKey -> Set(key)
+          for (const s of schedulesForPa) {
+            const d = moment.tz(s.start, tz).format('YYYY-MM-DD');
+            if (d !== todayKst) continue;
+            const botKey = s.botName || s.botId || '';
+            if (!botKey) continue;
+            const key = PowerAutomateRegistration.buildKeyFromIso({
+              subject: s.subject,
+              startIso: s.start,
+              endIso: s.end
+            });
+            if (!key) continue;
+            if (!desiredByBot.has(botKey)) desiredByBot.set(botKey, new Set());
+            desiredByBot.get(botKey).add(key);
+          }
+
+          let refreshCalls = 0;
+          for (const [botKey, desiredSet] of desiredByBot.entries()) {
+            if (paMaxRefreshCalls > 0 && refreshCalls >= paMaxRefreshCalls) break;
+            const registeredSet = await PowerAutomateRegistration.listRegisteredKeySetInRange({
+              botId: botKey,
+              startIso: dayStartIso,
+              endIso: dayEndIso
+            });
+
+            let different = desiredSet.size !== registeredSet.size;
+            if (!different) {
+              for (const k of desiredSet) {
+                if (!registeredSet.has(k)) { different = true; break; }
+              }
+            }
+
+            if (different) {
+              console.log(`♻️ PA 당일 갱신(diff 감지): bot=${botKey} desired=${desiredSet.size} registered=${registeredSet.size} → REFRESH(PUT)`);
+              try {
+                await powerAutomateService.refreshSchedulesByBotRange({
+                  bot: botKey,
+                  startDateTime: dayStartLocal,
+                  endDateTime: dayEndLocal,
+                  timeZone: tz
+                });
+                currentSync.progress.paRefreshCalls += 1;
+                refreshCalls += 1;
+
+                // 등록상태 테이블을 "오늘" 기준으로 교체
+                await PowerAutomateRegistration.deleteInRange({ botId: botKey, startIso: dayStartIso, endIso: dayEndIso });
+                for (const k of desiredSet) {
+                  // k 포맷: subject||YYYY-MM-DD HH:mm:ss||YYYY-MM-DD HH:mm:ss
+                  const [subject, startDt, endDt] = String(k).split('||');
+                  // markRegistered는 ISO가 필요하므로 DATETIME을 ISO로 재구성(로컬 기준으로 해석)
+                  const startIso = moment.tz(startDt, 'YYYY-MM-DD HH:mm:ss', tz).toISOString();
+                  const endIso = moment.tz(endDt, 'YYYY-MM-DD HH:mm:ss', tz).toISOString();
+                  await PowerAutomateRegistration.markRegistered({ botId: botKey, subject, startIso, endIso });
+                }
+              } catch (e) {
+                currentSync.progress.paRefreshErrors += 1;
+                console.warn(`⚠️ PA REFRESH 실패(bot=${botKey}): ${e.message}`);
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.warn(`⚠️ PA 당일 갱신(diff) 처리 실패(계속 진행): ${e.message}`);
+      }
+
       let paCreatesThisRun = 0;
       for (const schedule of schedulesForPa) {
         try {
@@ -570,6 +655,8 @@ router.post('/rpa-schedules', async (req, res) => {
       paSkipped: currentSync.progress.paSkipped,
       paQueryErrors: currentSync.progress.paQueryErrors,
       paCreateErrors: currentSync.progress.paCreateErrors,
+      paRefreshCalls: currentSync.progress.paRefreshCalls,
+      paRefreshErrors: currentSync.progress.paRefreshErrors,
       paDisabledReason: currentSync.progress.paDisabledReason,
       brity: brityDebug
     };

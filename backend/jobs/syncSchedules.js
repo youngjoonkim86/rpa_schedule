@@ -25,6 +25,8 @@ const PA_CREATE_ON_QUERY_ERROR =
 // ✅ 안전장치: 자동 동기화에서 PA create 폭주 방지
 const PA_MAX_CREATES_PER_RUN = Math.max(0, parseInt(process.env.PA_MAX_CREATES_PER_RUN || '200', 10) || 200);
 const PA_SYNC_TAG = String(process.env.PA_SYNC_TAG || 'RPA_SCHED_MANAGER');
+const PA_REFRESH_ON_DIFF = String(process.env.PA_REFRESH_ON_DIFF || 'true').toLowerCase() === 'true';
+const PA_MAX_REFRESH_CALLS = Math.max(0, parseInt(process.env.PA_MAX_REFRESH_CALLS || '10', 10) || 10);
 
 /**
  * 매시간 정각에 Brity RPA 스케줄 동기화
@@ -120,6 +122,75 @@ if (brityRpaService && Schedule && db) {
 
     // 2단계: Power Automate 처리(원본 기준)
     if (powerAutomateQueryAvailable || powerAutomateCreateAvailable) {
+      // ✅ 당일 갱신(diff 감지 → PUT refresh)
+      try {
+        const refreshUrlConfigured = !!process.env.POWER_AUTOMATE_REFRESH_URL;
+        if (PA_REFRESH_ON_DIFF && refreshUrlConfigured && powerAutomateService?.refreshSchedulesByBotRange) {
+          const todayKst = moment.tz(tz).format('YYYY-MM-DD');
+          const dayStartIso = moment.tz(todayKst, 'YYYY-MM-DD', tz).startOf('day').toISOString();
+          const dayEndIso = moment.tz(todayKst, 'YYYY-MM-DD', tz).endOf('day').toISOString();
+          const dayStartLocal = `${todayKst}T00:00:00`;
+          const dayEndLocal = `${todayKst}T23:59:59`;
+
+          const desiredByBot = new Map();
+          for (const s of schedulesForPa) {
+            const d = moment.tz(s.start, tz).format('YYYY-MM-DD');
+            if (d !== todayKst) continue;
+            const botKey = s.botName || s.botId || '';
+            if (!botKey) continue;
+            const key = PowerAutomateRegistration.buildKeyFromIso({
+              subject: s.subject,
+              startIso: s.start,
+              endIso: s.end
+            });
+            if (!key) continue;
+            if (!desiredByBot.has(botKey)) desiredByBot.set(botKey, new Set());
+            desiredByBot.get(botKey).add(key);
+          }
+
+          let refreshCalls = 0;
+          for (const [botKey, desiredSet] of desiredByBot.entries()) {
+            if (PA_MAX_REFRESH_CALLS > 0 && refreshCalls >= PA_MAX_REFRESH_CALLS) break;
+            const registeredSet = await PowerAutomateRegistration.listRegisteredKeySetInRange({
+              botId: botKey,
+              startIso: dayStartIso,
+              endIso: dayEndIso
+            });
+
+            let different = desiredSet.size !== registeredSet.size;
+            if (!different) {
+              for (const k of desiredSet) {
+                if (!registeredSet.has(k)) { different = true; break; }
+              }
+            }
+
+            if (different) {
+              console.log(`♻️(자동) PA 당일 갱신(diff): bot=${botKey} desired=${desiredSet.size} registered=${registeredSet.size}`);
+              try {
+                await powerAutomateService.refreshSchedulesByBotRange({
+                  bot: botKey,
+                  startDateTime: dayStartLocal,
+                  endDateTime: dayEndLocal,
+                  timeZone: tz
+                });
+                refreshCalls += 1;
+                await PowerAutomateRegistration.deleteInRange({ botId: botKey, startIso: dayStartIso, endIso: dayEndIso });
+                for (const k of desiredSet) {
+                  const [subject, startDt, endDt] = String(k).split('||');
+                  const startIso = moment.tz(startDt, 'YYYY-MM-DD HH:mm:ss', tz).toISOString();
+                  const endIso = moment.tz(endDt, 'YYYY-MM-DD HH:mm:ss', tz).toISOString();
+                  await PowerAutomateRegistration.markRegistered({ botId: botKey, subject, startIso, endIso });
+                }
+              } catch (e) {
+                console.warn(`⚠️(자동) PA REFRESH 실패(bot=${botKey}): ${e.message}`);
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.warn(`⚠️(자동) PA 당일 갱신(diff) 처리 실패(계속 진행): ${e.message}`);
+      }
+
       let paCreatesThisRun = 0;
       for (const schedule of schedulesForPa) {
         try {

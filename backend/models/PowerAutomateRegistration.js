@@ -39,6 +39,13 @@ async function ensureTable() {
 }
 
 class PowerAutomateRegistration {
+  static buildKeyFromIso({ subject, startIso, endIso }) {
+    const mysqlStart = toMySQLDateTime(startIso);
+    const mysqlEnd = toMySQLDateTime(endIso);
+    if (!mysqlStart || !mysqlEnd) return null;
+    return `${subject}||${mysqlStart}||${mysqlEnd}`;
+  }
+
   static async isRegistered({ botId, subject, startIso, endIso }) {
     await ensureTable();
     const mysqlStart = toMySQLDateTime(startIso);
@@ -97,6 +104,46 @@ class PowerAutomateRegistration {
       [botId, subject, mysqlStart, mysqlEnd, errorMessage || null, errorMessage || null]
     );
     return true;
+  }
+
+  static async listRegisteredKeySetInRange({ botId, startIso, endIso }) {
+    await ensureTable();
+    const mysqlStart = toMySQLDateTime(startIso);
+    const mysqlEnd = toMySQLDateTime(endIso);
+    if (!mysqlStart || !mysqlEnd) return new Set();
+
+    const [rows] = await db.execute(
+      `SELECT subject, start_datetime as startDt, end_datetime as endDt
+       FROM pa_registrations
+       WHERE bot_id = ?
+         AND status = 'REGISTERED'
+         AND start_datetime >= ?
+         AND end_datetime <= ?`,
+      [botId, mysqlStart, mysqlEnd]
+    );
+
+    const set = new Set();
+    for (const r of rows) {
+      set.add(`${r.subject}||${r.startDt}||${r.endDt}`);
+    }
+    return set;
+  }
+
+  static async deleteInRange({ botId, startIso, endIso }) {
+    await ensureTable();
+    const mysqlStart = toMySQLDateTime(startIso);
+    const mysqlEnd = toMySQLDateTime(endIso);
+    if (!mysqlStart || !mysqlEnd) return 0;
+
+    const [result] = await db.execute(
+      `DELETE FROM pa_registrations
+       WHERE bot_id = ?
+         AND start_datetime >= ?
+         AND end_datetime <= ?`,
+      [botId, mysqlStart, mysqlEnd]
+    );
+
+    return result?.affectedRows || 0;
   }
 }
 

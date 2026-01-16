@@ -84,6 +84,48 @@ class PowerAutomateService {
       throw err;
     }
   }
+
+  /**
+   * Power Automate "삭제 후 재등록" (Bot + 기간 단위)
+   * - 사용자가 제공한 Flow 엔드포인트(PUT)를 호출합니다.
+   *
+   * body 예:
+   * {
+   *   bot: "BOT5",
+   *   start: { dateTime: "2026-01-16T00:00:00", timeZone: "Asia/Seoul" },
+   *   end:   { dateTime: "2026-01-16T23:59:59", timeZone: "Asia/Seoul" }
+   * }
+   */
+  static async refreshSchedulesByBotRange({ bot, startDateTime, endDateTime, timeZone = 'Asia/Seoul' }) {
+    try {
+      const url = process.env.POWER_AUTOMATE_REFRESH_URL;
+      if (!url) {
+        throw new Error('POWER_AUTOMATE_REFRESH_URL이 설정되어 있지 않습니다.');
+      }
+
+      const response = await axios.put(
+        url,
+        {
+          bot,
+          start: { dateTime: startDateTime, timeZone },
+          end: { dateTime: endDateTime, timeZone }
+        },
+        {
+          headers: { 'Content-Type': 'application/json' },
+          timeout: 60000
+        }
+      );
+
+      return { success: true, data: response.data };
+    } catch (error) {
+      const status = error?.response?.status;
+      console.error('Power Automate 삭제 후 재등록(REFRESH) 실패:', status ? `${status} ${error.message}` : error.message);
+      const err = new Error(`Power Automate REFRESH API 오류${status ? ` (${status})` : ''}: ${error.message}`);
+      err.status = status;
+      err.code = error?.code;
+      throw err;
+    }
+  }
 }
 
 module.exports = PowerAutomateService;
