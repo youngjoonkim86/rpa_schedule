@@ -309,17 +309,19 @@ if (brityRpaService && Schedule && db) {
     }
 
     // 3단계: DB 적재(그룹핑 기준)
-    // ✅ 그룹핑이 켜진 경우: 기존 BRITY_RPA 데이터를 기간 내에서 교체(replace)
-    if (shouldGroup) {
+    // ✅ 자동 동기화도 기본적으로 "replace 모드"가 안전 (BRITY_RPA만 기간 내 소프트삭제 후 재적재)
+    const replaceBrityInRange =
+      String(process.env.BRITY_REPLACE_IN_RANGE || 'true').toLowerCase() === 'true';
+    if (replaceBrityInRange) {
       try {
         const deleted = await Schedule.softDeleteBySourceInRange({
           sourceSystem: 'BRITY_RPA',
           startDate: startDateStr,
           endDate: endDateStr
         });
-        console.log(`🧹(자동) 그룹핑 replace: 기존 BRITY_RPA ${deleted}건 소프트삭제 (${startDateStr}~${endDateStr})`);
+        console.log(`🧹(자동) replace: 기존 BRITY_RPA ${deleted}건 소프트삭제 (${startDateStr}~${endDateStr})`);
       } catch (e) {
-        console.warn('⚠️(자동) 그룹핑 replace 실패(계속 진행):', e.message);
+        console.warn('⚠️(자동) replace 실패(계속 진행):', e.message);
       }
     }
 

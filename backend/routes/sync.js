@@ -551,21 +551,26 @@ router.post('/rpa-schedules', async (req, res) => {
     }
 
     // 3단계: DB 적재(그룹핑 기준)
-    // ✅ 그룹핑이 켜진 경우: 기존 BRITY_RPA 데이터를 기간 내에서 교체(replace)하여
-    //    "원본 + 그룹핑"이 섞여 보이는 문제를 방지
-    if (shouldGroup) {
+    // ✅ 동기화는 기본적으로 "replace 모드"가 안전:
+    // - 동일 범위를 매번 재동기화할 때, 기존 BRITY_RPA 값이 남아 결과가 꼬이거나 과다/부족해 보이는 문제를 방지
+    // - MANUAL/POWER_AUTOMATE는 건드리지 않고 BRITY_RPA만 기간 내 소프트삭제 후 재적재
+    const replaceBrityInRange =
+      String(process.env.BRITY_REPLACE_IN_RANGE || 'true').toLowerCase() === 'true';
+    if (replaceBrityInRange) {
       try {
         const deleted = await Schedule.softDeleteBySourceInRange({
           sourceSystem: 'BRITY_RPA',
           startDate,
           endDate
         });
-        brityDebug.grouping.replaced = { enabled: true, deleted };
-        console.log(`🧹 그룹핑 replace: 기존 BRITY_RPA ${deleted}건 소프트삭제 (${startDate}~${endDate})`);
+        brityDebug.replace = { enabled: true, deleted };
+        console.log(`🧹 replace: 기존 BRITY_RPA ${deleted}건 소프트삭제 (${startDate}~${endDate})`);
       } catch (e) {
-        console.warn('⚠️ 그룹핑 replace 실패(계속 진행):', e.message);
-        brityDebug.grouping.replaced = { enabled: true, error: e.message };
+        console.warn('⚠️ replace 실패(계속 진행):', e.message);
+        brityDebug.replace = { enabled: true, error: e.message };
       }
+    } else {
+      brityDebug.replace = { enabled: false };
     }
 
     for (const schedule of schedulesForDb) {
