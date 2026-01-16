@@ -57,8 +57,11 @@ if (brityRpaService && Schedule && db) {
     };
 
     let schedules = [];
+    // ✅ Power Automate 등록은 "등록 스케줄(schedulings)"만 대상으로 해야 함
+    let schedulesForPaBase = [];
     if (effectiveBritySource === 'schedulings') {
       schedules = await brityRpaService.getSchedules(startDateStr, endDateStr);
+      schedulesForPaBase = schedules;
     } else {
       // ✅ jobs/list는 "실행 이력" 위주 → 과거/오늘 구간
       // ✅ schedulings/*는 "등록 스케줄(반복 규칙)" → 오늘/미래 구간
@@ -76,7 +79,9 @@ if (brityRpaService && Schedule && db) {
         endDateStr >= todayStr;
       if (mergeSchedulings && endDateStr >= todayStr) {
         const schedStartStr = startDateStr > todayStr ? startDateStr : todayStr;
-        schedules = [...schedules, ...(await brityRpaService.getSchedules(schedStartStr, endDateStr))];
+        const schedItems = await brityRpaService.getSchedules(schedStartStr, endDateStr);
+        schedulesForPaBase = [...schedulesForPaBase, ...schedItems];
+        schedules = [...schedules, ...schedItems];
       }
 
       const map = new Map();
@@ -88,7 +93,10 @@ if (brityRpaService && Schedule && db) {
     const bucketMinutesRaw = parseInt(process.env.BRITY_GROUP_BUCKET_MINUTES || '0', 10);
     const shouldGroup =
       Number.isFinite(bucketMinutesRaw) && bucketMinutesRaw > 0 && bucketMinutesRaw % 5 === 0;
-    const schedulesForPa = schedules; // 원본(정확한 시간)
+    // ✅ Power Automate 대상: schedulings 기반만 (dedupe)
+    const paMap = new Map();
+    for (const s of schedulesForPaBase) paMap.set(uniqueKey(s), s);
+    const schedulesForPa = Array.from(paMap.values());
     const schedulesForDb = shouldGroup
       ? groupSchedulesByTimeBucket(schedules, bucketMinutesRaw, tz)
       : schedules;

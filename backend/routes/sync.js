@@ -211,6 +211,9 @@ router.post('/rpa-schedules', async (req, res) => {
     };
 
     let schedules = [];
+    // ✅ Power Automate 등록은 "등록 스케줄(schedulings)"만 대상으로 해야 함
+    // - jobs/list(실행 이력)을 그대로 PA에 등록하면 수천건이 생성될 수 있음
+    let schedulesForPaBase = [];
     let brityDebug = {
       source: effectiveBritySource,
       jobs: null,
@@ -218,7 +221,8 @@ router.post('/rpa-schedules', async (req, res) => {
       merged: {
         beforeDedupe: 0,
         afterDedupe: 0
-      }
+      },
+      paInput: { source: null, beforeDedupe: 0, afterDedupe: 0 }
     };
     if (effectiveBritySource === 'jobs') {
       // ✅ jobs/list는 "실행 결과(이력)" 위주이므로 과거/오늘 구간에 적합
@@ -244,6 +248,8 @@ router.post('/rpa-schedules', async (req, res) => {
         console.log(`➕ /schedulings/* 병합(반복 규칙 전개): ${schedStartStr} ~ ${endDate}`);
         const schedRes = await brityRpaService.getSchedulesWithMeta(schedStartStr, endDate);
         brityDebug.schedulings = schedRes.meta;
+        // ✅ PA는 등록 스케줄만 사용
+        schedulesForPaBase = [...schedulesForPaBase, ...schedRes.items];
         schedules = [...schedules, ...schedRes.items];
       }
 
@@ -257,6 +263,7 @@ router.post('/rpa-schedules', async (req, res) => {
       console.log('📋 1단계: RPA 등록 스케줄 조회 (/schedulings/list)');
       const schedRes = await brityRpaService.getSchedulesWithMeta(startDate, endDate);
       schedules = schedRes.items;
+      schedulesForPaBase = schedRes.items;
       brityDebug.schedulings = schedRes.meta;
       brityDebug.merged.beforeDedupe = schedules.length;
       brityDebug.merged.afterDedupe = schedules.length;
@@ -277,7 +284,14 @@ router.post('/rpa-schedules', async (req, res) => {
     const shouldGroup =
       Number.isFinite(bucketMinutesRaw) && bucketMinutesRaw > 0 && bucketMinutesRaw % 5 === 0;
 
-    const schedulesForPa = schedules; // 원본
+    // ✅ Power Automate 대상: schedulings 기반(등록 스케줄)만
+    brityDebug.paInput.source = effectiveBritySource === 'jobs' ? 'schedulings_only' : 'schedulings';
+    brityDebug.paInput.beforeDedupe = schedulesForPaBase.length;
+    const paMap = new Map();
+    for (const s of schedulesForPaBase) paMap.set(uniqueKey(s), s);
+    const schedulesForPa = Array.from(paMap.values());
+    brityDebug.paInput.afterDedupe = schedulesForPa.length;
+
     const schedulesForDb = shouldGroup
       ? groupSchedulesByTimeBucket(schedules, bucketMinutesRaw, tz)
       : schedules;
