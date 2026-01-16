@@ -517,7 +517,7 @@ router.post('/rpa-schedules', async (req, res) => {
               body: `[syncTag=${paSyncTag}]\n${schedule.body || `프로세스: ${schedule.processName || ''}`}`
             };
             try {
-              await powerAutomateService.createSchedule(powerAutomateData);
+              await powerAutomateService.createScheduleThrottled(powerAutomateData);
               registeredCount++;
               paCreatesThisRun += 1;
               currentSync.progress.paRegistered += 1;

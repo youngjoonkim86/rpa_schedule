@@ -278,7 +278,7 @@ if (brityRpaService && Schedule && db) {
               body: `[syncTag=${PA_SYNC_TAG}]\n${schedule.body || `프로세스: ${schedule.processName || ''}`}`
             };
             try {
-              await powerAutomateService.createSchedule(powerAutomateData);
+              await powerAutomateService.createScheduleThrottled(powerAutomateData);
               registeredCount++;
               paCreatesThisRun += 1;
               await PowerAutomateRegistration.markRegistered({

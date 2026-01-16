@@ -150,7 +150,8 @@ exports.createSchedule = async (req, res) => {
     // Power Automate API 호출
     let powerAutomateResult = null;
     try {
-      powerAutomateResult = await powerAutomateService.createSchedule(scheduleData);
+      // ✅ PA 부하 방지: 등록은 1초 간격(기본, PA_CREATE_DELAY_MS)으로 throttle
+      powerAutomateResult = await powerAutomateService.createScheduleThrottled(scheduleData);
     } catch (paError) {
       console.warn('Power Automate API 호출 실패 (DB에는 저장):', paError.message);
       // Power Automate 실패해도 DB에는 저장

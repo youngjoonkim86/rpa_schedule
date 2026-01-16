@@ -2,6 +2,37 @@ const axios = require('axios');
 require('dotenv').config();
 
 class PowerAutomateService {
+  static _createQueue = Promise.resolve();
+  static _lastCreateAtMs = 0;
+
+  static _sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Power Automate create 호출을 직렬화 + 간격(throttle) 적용
+   * - 기본 간격: 1000ms (PA_CREATE_DELAY_MS)
+   */
+  static async createScheduleThrottled(scheduleData, delayMs = null) {
+    const effectiveDelayMs =
+      delayMs != null ? Number(delayMs) : Number(process.env.PA_CREATE_DELAY_MS || 1000);
+
+    // 큐에 순차적으로 쌓아서 동시호출을 막고 간격을 강제
+    this._createQueue = this._createQueue.then(async () => {
+      const d = Number.isFinite(effectiveDelayMs) ? Math.max(0, effectiveDelayMs) : 1000;
+      const now = Date.now();
+      const nextAllowed = (this._lastCreateAtMs || 0) + d;
+      const waitMs = Math.max(0, nextAllowed - now);
+      if (waitMs > 0) {
+        await this._sleep(waitMs);
+      }
+      // 다음 호출 기준점(요청 시작 시점) 업데이트
+      this._lastCreateAtMs = Date.now();
+      return await this.createSchedule(scheduleData);
+    });
+
+    return await this._createQueue;
+  }
   /**
    * Power Automate API를 통해 일정 등록
    */
