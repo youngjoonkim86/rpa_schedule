@@ -334,12 +334,13 @@ router.post('/rpa-schedules', async (req, res) => {
         brityDebug.jobs = jobRes.meta;
       }
 
-      // 2) schedulings/*: max(startDate, today) ~ endDate (미래 포함)
+      // 2) schedulings/*: startDate ~ endDate (동기화 시작일부터 전체 범위)
       const mergeSchedulings =
         String(process.env.BRITY_SYNC_MERGE_SCHEDULINGS || 'true').toLowerCase() === 'true' ||
         endDate >= todayStr;
       if (mergeSchedulings && endDate >= todayStr) {
-        const schedStartStr = startDate > todayStr ? startDate : todayStr;
+        // ✅ 동기화 시작일(startDate)부터 조회하여 PA 처리도 시작일부터 진행되도록 함
+        const schedStartStr = startDate;
         console.log(`➕ /schedulings/* 병합(반복 규칙 전개): ${schedStartStr} ~ ${endDate}`);
         // ✅ 하루 단위(또는 N일 단위)로 끊어서 조회
         const chunks = buildDateChunks(schedStartStr, endDate, SYNC_CHUNK_DAYS, tz);
