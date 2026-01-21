@@ -110,7 +110,8 @@ if (brityRpaService && Schedule && db) {
         String(process.env.BRITY_SYNC_MERGE_SCHEDULINGS || 'true').toLowerCase() === 'true' ||
         endDateStr >= todayStr;
       if (mergeSchedulings && endDateStr >= todayStr) {
-        const schedStartStr = startDateStr > todayStr ? startDateStr : todayStr;
+        // ✅ 동기화 시작일(startDateStr)부터 조회하여 PA 처리도 시작일부터 진행되도록 함
+        const schedStartStr = startDateStr;
         // ✅ 하루 단위(또는 N일 단위)로 끊어서 조회
         const chunks = buildDateChunks(schedStartStr, endDateStr, SYNC_CHUNK_DAYS, tz);
         for (const c of chunks) {
